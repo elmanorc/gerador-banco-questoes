@@ -74,6 +74,10 @@ def get_questions_for_topics(conn, topic_ids):
         FROM questaoresidencia q
         JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
         WHERE cq.id_topico IN ({format_strings})
+          AND q.alternativaE is null 
+          AND q.comentario IS NOT NULL
+          AND CHAR_LENGTH(q.comentario) >= 500
+          AND ano>=2020
         ORDER BY cq.id_topico, q.questao_id
     """
     cursor = conn.cursor(dictionary=True)
@@ -140,6 +144,26 @@ def get_breadcrumb_from_db(conn, id_topico):
 
 def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level=1, numbering=None, parent_names=None, questao_num=1, breadcrumb_raiz=None):
     print(f"[LOG] Adicionando seção para tópico: {topic_tree['nome']} (ID: {topic_tree['id']})")
+    
+    # Verificar se o tópico tem questões antes de processá-lo
+    total_questoes = count_questions_in_subtree(topic_tree, questions_by_topic)
+    if total_questoes == 0:
+        print(f"[LOG] Pulando tópico {topic_tree['nome']} - sem questões")
+        # Processar apenas os filhos que têm questões
+        for idx, child in enumerate(topic_tree.get('children', []), 1):
+            print(f"[LOG] Verificando filho: {child['nome']} (ID: {child['id']})")
+            questao_num = add_topic_sections_recursive(
+                document,
+                child,
+                questions_by_topic,
+                level=min(level+1, 9),
+                numbering=numbering + [idx] if numbering else [1, idx],
+                parent_names=parent_names + [topic_tree['nome']] if parent_names else [topic_tree['nome']],
+                questao_num=questao_num,
+                breadcrumb_raiz=breadcrumb_raiz
+            )
+        return questao_num
+    
     if numbering is None:
         numbering = [1]
     else:
@@ -147,33 +171,33 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
     if parent_names is None:
         parent_names = []
     numbering_str = '.'.join(str(n) for n in numbering) + '.'
-    total_questoes = count_questions_in_subtree(topic_tree, questions_by_topic)
    
     heading_text = f"{numbering_str} {topic_tree['nome']} ({total_questoes} {'questões' if total_questoes != 1 else 'questão'})"
 
-    # Cria nova seção para este tópico (exceto para o primeiro)
-    if numbering != [1]:
+    # Cria nova seção apenas para tópicos de nível 1 e 2
+    if numbering != [1] and level <= 2:
         document.add_section(WD_SECTION.NEW_PAGE)
-    # Adiciona breadcrumb no cabeçalho da seção
-    section = document.sections[-1]
-    section.header.is_linked_to_previous = False
-    section.footer.is_linked_to_previous = True
-    header = section.header
-    for p in header.paragraphs:
-        p.clear()
-    if numbering == [1] and breadcrumb_raiz:
-        p = header.paragraphs[0]
-        p.clear()
-        run = p.add_run(breadcrumb_raiz)
-        run.bold = True
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    else:
-        breadcrumb = get_breadcrumb(topic_tree, numbering, parent_names)
-        p = header.paragraphs[0]
-        p.clear()
-        run = p.add_run(breadcrumb)
-        run.bold = True
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    # Adiciona breadcrumb no cabeçalho da seção apenas para tópicos de nível 1 e 2
+    if level <= 2:
+        section = document.sections[-1]
+        section.header.is_linked_to_previous = False
+        section.footer.is_linked_to_previous = True
+        header = section.header
+        for p in header.paragraphs:
+            p.clear()
+        if numbering == [1] and breadcrumb_raiz:
+            p = header.paragraphs[0]
+            p.clear()
+            run = p.add_run(breadcrumb_raiz)
+            run.bold = True
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        else:
+            breadcrumb = get_breadcrumb(topic_tree, numbering, parent_names)
+            p = header.paragraphs[0]
+            p.clear()
+            run = p.add_run(breadcrumb)
+            run.bold = True
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
 
     document.add_heading(heading_text, level=level)
     document.add_paragraph("")
@@ -208,7 +232,7 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         enunciado_texto = extrair_texto_sem_imagens(q['enunciado'])
         p.add_run(clean_xml_illegal_chars(enunciado_texto))
         # Adiciona as imagens do enunciado (abaixo do texto)
-        add_imagens_enunciado(document, q['enunciado'], q['codigo'], r"C:\\Users\\elman\\OneDrive\\Imagens\\QuestoesResidencia")
+        add_imagens_enunciado(document, q['enunciado'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia")
         for alt in ['A', 'B', 'C', 'D', 'E']:
             alt_text = q.get(f'alternativa{alt}')
             if alt_text:
@@ -225,7 +249,7 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         run.bold = True
 
         if q.get('comentario'):
-            add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\\Users\\elman\\OneDrive\\Imagens\\QuestoesResidencia_comentarios")
+            add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
         document.add_paragraph("")  # Espaço
         questao_num += 1
     # Adiciona filhos recursivamente
@@ -340,6 +364,8 @@ def add_enunciado_with_images(document, enunciado_html, codigo_questao, imagens_
     flush_buffer()
 
 def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir):
+    # Reduz múltiplas linhas em branco para apenas uma (\n\n), mantendo parágrafos separados
+    comentario_md = re.sub(r'\n{3,}', '\n\n', comentario_md)
     html = markdown(comentario_md)
     soup = BeautifulSoup(html, "html.parser")
     img_count = [1]
@@ -493,8 +519,22 @@ def gerar_banco_questoes_para_topico(conn, id_topico, output_filename, amostra=1
     for tid in questions_by_topic:
         questoes = questions_by_topic[tid]
         if 0 < amostra < 1 and len(questoes) > 0:
-            n = max(1, int(len(questoes) * amostra))
-            questions_by_topic[tid] = random.sample(questoes, n)
+            # Estratégia para reduzir total de questões
+            if len(questoes) == 1:
+                # Tópicos com apenas 1 questão: 50% de chance de serem incluídos
+                if random.random() < 0.5:
+                    n = 1
+                else:
+                    n = 0
+            else:
+                # Tópicos com mais questões: aplicar amostra normal
+                n = max(1, int(len(questoes) * amostra))
+            
+            if n > 0:
+                questions_by_topic[tid] = random.sample(questoes, n)
+            else:
+                # Remove tópicos sem questões selecionadas
+                questions_by_topic[tid] = []
     document = Document()
     breadcrumb_raiz = get_breadcrumb_from_db(conn, id_topico)
     print(f"[LOG] Breadcrumb raiz: {breadcrumb_raiz}")
@@ -515,10 +555,458 @@ def gerar_nome_arquivo(numero, nome_topico):
     nome_limpo = ''.join(c for c in nome_topico if c.isalnum() or c in ' _-').strip().replace(' ', '_')
     return f"{numero}.{nome_limpo[:30]}.docx"
 
+AREAS = {
+    "CIRURGIA": {"codigos": [33], "proporcao": 0.15},
+    "CLÍNICA MÉDICA": {"codigos": [100], "proporcao": 0.25},
+    "GINECOLOGIA": {"codigos": [183], "proporcao": 0.06},
+    "OBSTETRÍCIA": {"codigos": [218], "proporcao": 0.09},
+    "PEDIATRIA": {"codigos": [48], "proporcao": 0.15},
+    "Medicina da Família e Comunidade": {"codigos": [180], "proporcao": 0.10},
+    "Saúde Mental": {"codigos": [68], "proporcao": 0.10},
+    "Saúde Coletiva": {"codigos": [30, 53, 1593, 1735], "proporcao": 0.10},
+}
+
+def get_questoes_por_area(conn, codigos_area, n_questoes):
+    # Busca todos os tópicos descendentes dos códigos principais
+    todos_topicos = []
+    for codigo in codigos_area:
+        topic_tree = get_topic_tree_recursive(conn, codigo)
+        todos_topicos.extend(get_all_topic_ids(topic_tree))
+    # Conta questões por tópico
+    cursor = conn.cursor(dictionary=True)
+    format_strings = ','.join(['%s'] * len(todos_topicos))
+    query = f'''
+        SELECT cq.id_topico, q.questao_id
+        FROM classificacao_questao cq
+        JOIN questaoresidencia q ON cq.id_questao = q.questao_id
+        WHERE cq.id_topico IN ({format_strings})
+          AND q.alternativaE IS NULL
+          AND q.comentario IS NOT NULL
+          AND CHAR_LENGTH(q.comentario) >= 500
+          AND q.ano >= 2020
+    '''
+    cursor.execute(query, tuple(todos_topicos))
+    questoes = cursor.fetchall()
+    # Conta frequência por tópico
+    from collections import Counter, defaultdict
+    topico_count = Counter([q['id_topico'] for q in questoes])
+    # Ordena tópicos por frequência
+    topicos_ordenados = [t for t, _ in topico_count.most_common()]
+    # Seleciona questões dos tópicos mais frequentes até atingir n_questoes
+    questoes_selecionadas = []
+    for topico in topicos_ordenados:
+        questoes_topico = [q['questao_id'] for q in questoes if q['id_topico'] == topico]
+        for qid in questoes_topico:
+            if len(questoes_selecionadas) < n_questoes:
+                questoes_selecionadas.append(qid)
+            else:
+                break
+        if len(questoes_selecionadas) >= n_questoes:
+            break
+    return questoes_selecionadas
+
+def gerar_banco_proporcional(conn, N):
+    """
+    Gera um banco de questões com N questões totais, respeitando as proporções das áreas principais.
+    """
+    print(f"[LOG] Gerando banco de questões com {N} questões totais...")
+    
+    # Calcular número de questões por área
+    questoes_por_area = {}
+    for area, info in AREAS.items():
+        n_area = int(N * info["proporcao"])
+        questoes_por_area[area] = n_area
+        print(f"[LOG] {area}: {n_area} questões")
+    
+    # Coletar todas as questões selecionadas
+    todas_questoes_ids = []
+    area_info = {}
+    
+    for area, info in AREAS.items():
+        print(f"[LOG] Selecionando questões para {area}...")
+        questoes_area = get_questoes_por_area(conn, info["codigos"], questoes_por_area[area])
+        todas_questoes_ids.extend(questoes_area)
+        area_info[area] = {
+            "codigos": info["codigos"],
+            "proporcao": info["proporcao"],
+            "questoes_selecionadas": len(questoes_area),
+            "questoes_ids": questoes_area
+        }
+        print(f"[LOG] {area}: {len(questoes_area)} questões selecionadas")
+    
+    # Buscar dados completos das questões selecionadas
+    if not todas_questoes_ids:
+        print("[ERRO] Nenhuma questão foi selecionada!")
+        return
+    
+    cursor = conn.cursor(dictionary=True)
+    format_strings = ','.join(['%s'] * len(todas_questoes_ids))
+    query = f"""
+        SELECT q.*, cq.id_topico
+        FROM questaoresidencia q
+        JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
+        WHERE q.questao_id IN ({format_strings})
+        ORDER BY cq.id_topico, q.questao_id
+    """
+    cursor.execute(query, tuple(todas_questoes_ids))
+    questoes_completas = cursor.fetchall()
+    
+    print(f"[LOG] Total de questões recuperadas: {len(questoes_completas)}")
+    
+    # Organizar questões por tópico
+    questions_by_topic = {}
+    for q in questoes_completas:
+        tid = q['id_topico']
+        if tid not in questions_by_topic:
+            questions_by_topic[tid] = []
+        questions_by_topic[tid].append(q)
+    
+    # Recuperar estrutura hierárquica completa dos tópicos selecionados
+    print("[LOG] Recuperando estrutura hierárquica dos tópicos...")
+    topicos_selecionados = set(questions_by_topic.keys())
+    
+    # Para cada área, recuperar a árvore hierárquica completa
+    topic_trees = []
+    for area, info in AREAS.items():
+        for codigo in info["codigos"]:
+            topic_tree = get_topic_tree_recursive(conn, codigo)
+            topic_trees.append(topic_tree)
+    
+    # Função para coletar todos os tópicos da árvore que têm questões
+    def collect_topic_with_questions(topic_tree, questions_by_topic):
+        result = []
+        if topic_tree['id'] in questions_by_topic:
+            result.append(topic_tree)
+        for child in topic_tree.get('children', []):
+            result.extend(collect_topic_with_questions(child, questions_by_topic))
+        return result
+    
+    # Coletar tópicos com questões em ordem hierárquica
+    topicos_hierarquicos = []
+    for topic_tree in topic_trees:
+        topicos_hierarquicos.extend(collect_topic_with_questions(topic_tree, questions_by_topic))
+    
+    print(f"[LOG] Tópicos organizados hierarquicamente: {len(topicos_hierarquicos)}")
+    
+    # Reorganizar questões para limitar sumário ao terceiro nível
+    print("[LOG] Reorganizando questões para limitar sumário ao terceiro nível...")
+    
+    # Função para encontrar o tópico pai de nível 3
+    def find_level3_parent(topic_tree, target_id, current_path=None):
+        if current_path is None:
+            current_path = []
+        
+        current_path.append(topic_tree['id'])
+        
+        if topic_tree['id'] == target_id:
+            # Encontrar o tópico de nível 3 no caminho
+            if len(current_path) >= 3:
+                return current_path[2]  # Índice 2 = nível 3 (0-based)
+            elif len(current_path) >= 2:
+                return current_path[1]  # Se não tem nível 3, usa nível 2
+            else:
+                return current_path[0]  # Se não tem nível 2, usa nível 1
+        
+        for child in topic_tree.get('children', []):
+            result = find_level3_parent(child, target_id, current_path.copy())
+            if result:
+                return result
+        
+        return None
+    
+    # Reorganizar questões por tópicos de nível 3 ou menor
+    questions_by_level3_topic = {}
+    topic_level3_info = {}
+    
+    for topic in topicos_hierarquicos:
+        tid = topic['id']
+        questoes_topic = questions_by_topic.get(tid, [])
+        
+        if not questoes_topic:
+            continue
+        
+        # Encontrar o tópico pai de nível 3
+        level3_parent_id = None
+        for topic_tree in topic_trees:
+            level3_parent_id = find_level3_parent(topic_tree, tid)
+            if level3_parent_id:
+                break
+        
+        if not level3_parent_id:
+            level3_parent_id = tid  # Se não encontrar, usa o próprio tópico
+        
+        # Buscar informações do tópico pai de nível 3
+        cursor.execute("SELECT nome FROM topico WHERE id = %s", (level3_parent_id,))
+        row = cursor.fetchone()
+        level3_parent_name = row['nome'] if row else f"Tópico {level3_parent_id}"
+        
+        # Agrupar questões sob o tópico de nível 3
+        if level3_parent_id not in questions_by_level3_topic:
+            questions_by_level3_topic[level3_parent_id] = []
+            topic_level3_info[level3_parent_id] = {
+                'nome': level3_parent_name,
+                'id': level3_parent_id
+            }
+        
+        questions_by_level3_topic[level3_parent_id].extend(questoes_topic)
+    
+    # Determinar nível hierárquico e ordem hierárquica para cada tópico de nível 3
+    topic_level3_with_level = []
+    for level3_id, questoes in questions_by_level3_topic.items():
+        if not questoes:
+            continue
+        
+        # Encontrar o nível hierárquico e a posição hierárquica do tópico
+        def get_topic_level_and_position(topic_tree, target_id, current_level=1, current_path=None):
+            if current_path is None:
+                current_path = []
+            
+            current_path.append(topic_tree['id'])
+            
+            if topic_tree['id'] == target_id:
+                return current_level, current_path
+            
+            for child in topic_tree.get('children', []):
+                result = get_topic_level_and_position(child, target_id, current_level + 1, current_path.copy())
+                if result:
+                    return result
+            
+            return None
+        
+        level = 1
+        hierarchical_path = []
+        for topic_tree in topic_trees:
+            result = get_topic_level_and_position(topic_tree, level3_id)
+            if result:
+                level, hierarchical_path = result
+                break
+        
+        topic_level3_with_level.append({
+            'id': level3_id,
+            'nome': topic_level3_info[level3_id]['nome'],
+            'questoes': questoes,
+            'level': level,
+            'hierarchical_path': hierarchical_path
+        })
+    
+    # Ordenar por caminho hierárquico (mantém a ordem natural da árvore)
+    def sort_by_hierarchical_path(topic_info):
+        path = topic_info['hierarchical_path']
+        # Converte o caminho em uma string ordenável
+        return '_'.join(str(id) for id in path)
+    
+    topic_level3_with_level.sort(key=sort_by_hierarchical_path)
+    
+    # Gerar numeração hierárquica correta (mesma lógica da opção 1)
+    def generate_hierarchical_numbering(topic_level3_with_level):
+        """Gera numeração hierárquica seguindo a mesma lógica da opção 1"""
+        numbering_map = {}
+        current_numbering = [1]
+        current_level = 1
+        
+        for topic_info in topic_level3_with_level:
+            level = topic_info['level']
+            
+            # Ajustar numeração baseada no nível
+            if level == 1:
+                # Novo tópico principal
+                current_numbering = [len(numbering_map) + 1]
+            elif level == 2:
+                # Subtópico nível 2
+                if len(current_numbering) == 1:
+                    current_numbering.append(1)
+                else:
+                    current_numbering[1] = current_numbering[1] + 1
+            elif level == 3:
+                # Subtópico nível 3
+                if len(current_numbering) == 1:
+                    current_numbering.extend([1, 1])
+                elif len(current_numbering) == 2:
+                    current_numbering.append(1)
+                else:
+                    current_numbering[2] = current_numbering[2] + 1
+            
+            # Gerar numeração como string
+            numbering_str = '.'.join(str(n) for n in current_numbering) + '.'
+            numbering_map[topic_info['id']] = numbering_str
+        
+        return numbering_map
+    
+    # Gerar numeração hierárquica
+    numbering_map = generate_hierarchical_numbering(topic_level3_with_level)
+    
+    # Adicionar numeração para cada tópico
+    for topic_info in topic_level3_with_level:
+        topic_info['numbering'] = numbering_map.get(topic_info['id'], "1.")
+    
+    print(f"[LOG] Tópicos reorganizados para sumário limitado: {len(topic_level3_with_level)}")
+    
+    # Gerar documento
+    document = Document()
+    style = document.styles['Normal']
+    font = style.font
+    font.name = 'Calibri'
+    font.size = Pt(12)
+    paragraph_format = style.paragraph_format
+    paragraph_format.space_after = Pt(3)
+    paragraph_format.space_before = Pt(0)
+    paragraph_format.line_spacing = 1
+    
+    # Configurar cabeçalho da capa
+    section_capa = document.sections[0]
+    section_capa.header.is_linked_to_previous = False
+    header_capa = section_capa.first_page_header
+    for p in header_capa.paragraphs:
+        p.clear()
+    img_path = os.path.join(os.path.dirname(__file__), 'logotipo_frase.png')
+    p = header_capa.paragraphs[0]
+    p.clear()
+    if os.path.exists(img_path):
+        print(f"[LOG] Adicionando imagem de capa: {img_path}")
+        run = p.add_run()
+        run.add_picture(img_path)
+    else:
+        print(f"[LOG] Imagem de capa não encontrada: {img_path}")
+    p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    
+    # Título principal
+    capa_title = document.add_paragraph()
+    capa_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = capa_title.add_run(f"Banco de Questões - {N} Questões")
+    run.bold = True
+    run.font.size = Pt(28)
+    
+    # Adicionar seção de distribuição por área
+    document.add_section(WD_SECTION.NEW_PAGE)
+    section = document.sections[1]
+    section.header.is_linked_to_previous = False
+    header = section.header
+    for p in header.paragraphs:
+        p.clear()
+    
+    # Listar distribuição por área
+    for area, info in area_info.items():
+        p = document.add_paragraph()
+        p.add_run(f"{area}: ").bold = True
+        p.add_run(f"{info['questoes_selecionadas']} questões ({info['proporcao']*100:.0f}%)")
+    
+    document.add_paragraph("")
+    document.add_paragraph("Sumário:")
+    toc_paragraph = document.add_paragraph()
+    add_toc(toc_paragraph)
+    
+    # Adicionar questões organizadas por tópicos de nível 3
+    questao_num = 1
+    for idx, topic_info in enumerate(topic_level3_with_level, 1):
+        tid = topic_info['id']
+        nome_topico = topic_info['nome']
+        questoes_topic = topic_info['questoes']
+        level = topic_info['level']
+        hierarchical_path = topic_info['hierarchical_path']
+        numbering = topic_info['numbering']
+
+        # Tópico principal em maiúsculas
+        if level == 1:
+            nome_topico = nome_topico.upper()
+
+        heading_text = f"{numbering} {nome_topico} ({len(questoes_topic)} {'questões' if len(questoes_topic) != 1 else 'questão'})"
+        document.add_section(WD_SECTION.NEW_PAGE)
+        section = document.sections[-1]
+        section.header.is_linked_to_previous = False
+        header = section.header
+        for p in header.paragraphs:
+            p.clear()
+        document.add_heading(heading_text, level=level)
+        document.add_paragraph("")
+        
+        # Adicionar questões do tópico
+        for q in questoes_topic:
+            print(f"[LOG] Adicionando questão {q.get('codigo', '?')} ao tópico {nome_topico}")
+            
+            # Determina o nível de dificuldade textual
+            dificuldade_val = q.get('dificuldade', 0)
+            try:
+                dificuldade_val = int(dificuldade_val)
+            except Exception:
+                dificuldade_val = 0
+            if dificuldade_val in [1, 2]:
+                nivel_dificuldade = 'FÁCIL'
+            elif dificuldade_val == 3:
+                nivel_dificuldade = 'MÉDIO'
+            elif dificuldade_val in [4, 5]:
+                nivel_dificuldade = 'DIFÍCIL'
+            else:
+                nivel_dificuldade = ''
+            
+            # Monta o cabeçalho no padrão solicitado
+            cabecalho = (
+                f"{questao_num}. (QR.{q['codigo']}, {q['ano']}, {q.get('instituicao', '')}"
+                f"{' - ' + q.get('orgao', '') if q.get('orgao') else ''}. Dificuldade: {nivel_dificuldade}). "
+            )
+            
+            # Cria o parágrafo e adiciona o cabeçalho em negrito
+            p = document.add_paragraph()
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+            run = p.add_run(clean_xml_illegal_chars(cabecalho))
+            run.bold = True
+            
+            # Adiciona o enunciado (texto puro) na mesma linha
+            enunciado_texto = extrair_texto_sem_imagens(q['enunciado'])
+            p.add_run(clean_xml_illegal_chars(enunciado_texto))
+            
+            # Adiciona as imagens do enunciado (abaixo do texto)
+            add_imagens_enunciado(document, q['enunciado'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia")
+            
+            for alt in ['A', 'B', 'C', 'D', 'E']:
+                alt_text = q.get(f'alternativa{alt}')
+                if alt_text:
+                    safe_text = clean_xml_illegal_chars(f"{alt}) {alt_text}")
+                    document.add_paragraph(safe_text)
+            
+            document.add_paragraph("")
+            p = document.add_paragraph()
+            run = p.add_run("------  COMENTÁRIO  ------")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0x1E, 0x90, 0xFF)
+            
+            p = document.add_paragraph()
+            gabarito_texto_limpo = clean_xml_illegal_chars(q['gabarito_texto'])
+            run = p.add_run(f"Gabarito: {q['gabarito']} - {gabarito_texto_limpo}")
+            run.bold = True
+            
+            if q.get('comentario'):
+                add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
+            
+            questao_num += 1
+    
+    # Adicionar rodapé
+    add_footer_with_text_and_page_number(document)
+    
+    # Salvar documento
+    from datetime import datetime
+    data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"banco_questoes_{N}_{data_atual}.docx"
+    
+    document.save(output_filename)
+    print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
+    print(f"[LOG] Total de questões no banco: {len(questoes_completas)}")
+    
+    return output_filename
+
 def main(id_topico_raiz, output_filename, amostra=1.0):
     print(f"[LOG] Iniciando main com id_topico_raiz={id_topico_raiz}, output_filename={output_filename}, amostra={amostra}")
     conn = get_connection()
     print("[LOG] Conexão com o banco estabelecida.")
+    # Recupera o nome do tópico pai para criar o diretório
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT nome FROM topico WHERE id = %s", (id_topico_raiz,))
+    row_raiz = cursor.fetchone()
+    nome_raiz = row_raiz['nome'] if row_raiz else 'topico_raiz'
+    # Limpa o nome para ser um nome de pasta seguro
+    nome_raiz_dir = ''.join(c for c in nome_raiz if c.isalnum() or c in ' _-').strip().replace(' ', '_')
+    # Cria o diretório se não existir
+    if not os.path.exists(nome_raiz_dir):
+        os.makedirs(nome_raiz_dir)
     topic_tree = get_topic_tree_recursive(conn, id_topico_raiz)
     print("[LOG] Árvore de tópicos recuperada.")
     all_topics = get_all_topic_ids(topic_tree)
@@ -532,8 +1020,22 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
     for tid in questions_by_topic:
         questoes = questions_by_topic[tid]
         if 0 < amostra < 1 and len(questoes) > 0:
-            n = max(1, int(len(questoes) * amostra))
-            questions_by_topic[tid] = random.sample(questoes, n)
+            # Estratégia para reduzir total de questões
+            if len(questoes) == 1:
+                # Tópicos com apenas 1 questão: 50% de chance de serem incluídos
+                if random.random() < 0.5:
+                    n = 1
+                else:
+                    n = 0
+            else:
+                # Tópicos com mais questões: aplicar amostra normal
+                n = max(1, int(len(questoes) * amostra))
+            
+            if n > 0:
+                questions_by_topic[tid] = random.sample(questoes, n)
+            else:
+                # Remove tópicos sem questões selecionadas
+                questions_by_topic[tid] = []
     document = Document()
     style = document.styles['Normal']
     font = style.font
@@ -579,13 +1081,7 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     toc_paragraph = document.add_paragraph()
     add_toc(toc_paragraph)
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT nome FROM topico WHERE id = %s", (id_topico_raiz,))
-    row_raiz = cursor.fetchone()
-    nome_raiz = row_raiz['nome'] if row_raiz else 'topico_raiz'
-    filename_raiz = gerar_nome_arquivo("1", nome_raiz)
-    print(f"[LOG] Gerando banco de questões para o tópico raiz: {nome_raiz} ({id_topico_raiz}) em {filename_raiz}")
-    gerar_banco_questoes_para_topico(conn, id_topico_raiz, filename_raiz, amostra=amostra)
+    # --- Geração dos arquivos dos filhos dentro do diretório ---
     cursor.execute("SELECT id, nome FROM topico WHERE id_pai = %s", (id_topico_raiz,))
     filhos = cursor.fetchall()
     filhos_info = []
@@ -594,9 +1090,11 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
         nome_filho = filho['nome']
         numero = f"1.{idx}"
         filename = gerar_nome_arquivo(numero, nome_filho)
-        print(f"[LOG] Gerando banco de questões para o filho: {nome_filho} ({id_filho}) em {filename}")
-        gerar_banco_questoes_para_topico(conn, id_filho, filename, amostra=amostra)
-        filhos_info.append({'id': id_filho, 'nome': nome_filho, 'filename': filename})
+        caminho_completo = os.path.join(nome_raiz_dir, filename)
+        print(f"[LOG] Gerando banco de questões para o filho: {nome_filho} ({id_filho}) em {caminho_completo}")
+        gerar_banco_questoes_para_topico(conn, id_filho, caminho_completo, amostra=amostra)
+        filhos_info.append({'id': id_filho, 'nome': nome_filho, 'filename': caminho_completo})
+    # --- Geração do sumário dentro do diretório ---
     def gerar_sumario_docx_custom(conn, id_topico_raiz, filhos_info, output_filename):
         from docx import Document
         from docx.shared import Pt, RGBColor
@@ -637,8 +1135,25 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
             for tid in questions_by_topic:
                 questoes = questions_by_topic[tid]
                 if 0 < amostra_local < 1 and len(questoes) > 0:
-                    n = max(1, int(len(questoes) * amostra_local))
-                    questions_by_topic[tid] = random.sample(questoes, n)
+                    # Estratégia para reduzir total de questões
+                    if len(questoes) == 1:
+                        # Tópicos com apenas 1 questão: 50% de chance de serem incluídos
+                        if random.random() < 0.5:
+                            n = 1
+                        else:
+                            n = 0
+                    elif len(questoes) <= 3:
+                        # Tópicos com 2-3 questões: aplicar amostra reduzida
+                        n = max(0, int(len(questoes) * amostra_local * 0.7))  # 30% menos
+                    else:
+                        # Tópicos com mais questões: aplicar amostra normal
+                        n = max(1, int(len(questoes) * amostra_local))
+                    
+                    if n > 0:
+                        questions_by_topic[tid] = random.sample(questoes, n)
+                    else:
+                        # Remove tópicos sem questões selecionadas
+                        questions_by_topic[tid] = []
             total_questoes = sum(len(questions_by_topic[tid]) for tid in questions_by_topic)
             totais_filhos.append(total_questoes)
             total_geral += total_questoes
@@ -653,7 +1168,7 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
         # Lista os tópicos filhos
         for idx, filho in enumerate(filhos_info, 1):
             nome = filho['nome']
-            filename = filho['filename']
+            filename = os.path.basename(filho['filename'])
             total_questoes = totais_filhos[idx-1]
             texto_link = f"{nome} ({total_questoes} {'questões' if total_questoes != 1 else 'questão'})"
             p = document.add_paragraph()
@@ -664,14 +1179,44 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
                     run.font.color.rgb = RGBColor(0x00, 0x00, 0xFF)
         document.save(output_filename)
         print(f"[LOG] Arquivo de sumário {output_filename} gerado com sucesso.")
-    gerar_sumario_docx_custom(conn, id_topico_raiz, filhos_info, "sumario_bancos_de_questoes.docx")
-    document.save(output_filename)
-    print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
+    sumario_path = os.path.join(nome_raiz_dir, "sumario_bancos_de_questoes.docx")
+    gerar_sumario_docx_custom(conn, id_topico_raiz, filhos_info, sumario_path)
+    # Salva o arquivo principal também dentro do diretório
+    #output_filename = os.path.join(nome_raiz_dir, os.path.basename(output_filename))
+    #document.save(output_filename)
+    #print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
 
 if __name__ == "__main__":
-    cod = int(input("Codigo do topico:"))
-    try:
-        amostra = float(input("Porcentagem de questões a incluir (0-100, Enter para tudo):") or 100) / 100.0
-    except Exception:
-        amostra = 1.0
-    main(id_topico_raiz=cod, output_filename="questoes_por_topico.docx", amostra=amostra)
+    print("=== GERADOR DE BANCOS DE QUESTÕES ===")
+    print("1. Gerar banco por tópico específico")
+    print("2. Gerar banco proporcional por área")
+    
+    opcao = input("Escolha a opção (1 ou 2): ").strip()
+    
+    if opcao == "1":
+        # Modo original - por tópico específico
+        cod = int(input("Código do tópico: "))
+        try:
+            amostra = float(input("Porcentagem de questões a incluir (0-100, Enter para tudo):") or 100) / 100.0
+        except Exception:
+            amostra = 1.0
+        main(id_topico_raiz=cod, output_filename="questoes_por_topico.docx", amostra=amostra)
+    
+    elif opcao == "2":
+        # Novo modo - proporcional por área
+        try:
+            N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
+            if N <= 0:
+                print("Erro: N deve ser um número positivo!")
+                exit(1)
+        except ValueError:
+            print("Erro: N deve ser um número inteiro!")
+            exit(1)
+        
+        conn = get_connection()
+        print("[LOG] Conexão com o banco estabelecida.")
+        gerar_banco_proporcional(conn, N)
+        conn.close()
+    
+    else:
+        print("Opção inválida!")
