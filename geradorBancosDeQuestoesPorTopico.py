@@ -572,11 +572,12 @@ def get_questoes_por_area(conn, codigos_area, n_questoes):
     for codigo in codigos_area:
         topic_tree = get_topic_tree_recursive(conn, codigo)
         todos_topicos.extend(get_all_topic_ids(topic_tree))
-    # Conta questões por tópico
+    
+    # Buscar todas as questões da área
     cursor = conn.cursor(dictionary=True)
     format_strings = ','.join(['%s'] * len(todos_topicos))
     query = f'''
-        SELECT cq.id_topico, q.questao_id
+        SELECT q.questao_id
         FROM classificacao_questao cq
         JOIN questaoresidencia q ON cq.id_questao = q.questao_id
         WHERE cq.id_topico IN ({format_strings})
@@ -587,23 +588,19 @@ def get_questoes_por_area(conn, codigos_area, n_questoes):
     '''
     cursor.execute(query, tuple(todos_topicos))
     questoes = cursor.fetchall()
-    # Conta frequência por tópico
-    from collections import Counter, defaultdict
-    topico_count = Counter([q['id_topico'] for q in questoes])
-    # Ordena tópicos por frequência
-    topicos_ordenados = [t for t, _ in topico_count.most_common()]
-    # Seleciona questões dos tópicos mais frequentes até atingir n_questoes
-    questoes_selecionadas = []
-    for topico in topicos_ordenados:
-        questoes_topico = [q['questao_id'] for q in questoes if q['id_topico'] == topico]
-        for qid in questoes_topico:
-            if len(questoes_selecionadas) < n_questoes:
-                questoes_selecionadas.append(qid)
-            else:
-                break
-        if len(questoes_selecionadas) >= n_questoes:
-            break
-    return questoes_selecionadas
+    
+    # Aplicar amostragem para atingir n_questoes
+    if len(questoes) > n_questoes:
+        # Calcular amostra necessária
+        amostra = n_questoes / len(questoes)
+        n_selecionadas = int(len(questoes) * amostra)
+        questoes_selecionadas = random.sample(questoes, n_selecionadas)
+    else:
+        # Se há menos questões que o solicitado, usar todas
+        questoes_selecionadas = questoes
+    
+    # Retornar apenas os IDs das questões selecionadas
+    return [q['questao_id'] for q in questoes_selecionadas]
 
 def gerar_banco_proporcional(conn, N):
     """
@@ -799,35 +796,34 @@ def gerar_banco_proporcional(conn, N):
     
     # Gerar numeração hierárquica correta (mesma lógica da opção 1)
     def generate_hierarchical_numbering(topic_level3_with_level):
-        """Gera numeração hierárquica seguindo a mesma lógica da opção 1"""
+        """Gera numeração hierárquica sequencial simples"""
         numbering_map = {}
-        current_numbering = [1]
-        current_level = 1
+        
+        # Contadores para cada nível
+        current_main = 0
+        current_sub = 0
+        current_subsub = 0
         
         for topic_info in topic_level3_with_level:
             level = topic_info['level']
             
-            # Ajustar numeração baseada no nível
             if level == 1:
                 # Novo tópico principal
-                current_numbering = [len(numbering_map) + 1]
+                current_main += 1
+                current_sub = 0
+                current_subsub = 0
+                numbering = [current_main]
             elif level == 2:
                 # Subtópico nível 2
-                if len(current_numbering) == 1:
-                    current_numbering.append(1)
-                else:
-                    current_numbering[1] = current_numbering[1] + 1
+                current_sub += 1
+                current_subsub = 0
+                numbering = [current_main, current_sub]
             elif level == 3:
                 # Subtópico nível 3
-                if len(current_numbering) == 1:
-                    current_numbering.extend([1, 1])
-                elif len(current_numbering) == 2:
-                    current_numbering.append(1)
-                else:
-                    current_numbering[2] = current_numbering[2] + 1
+                current_subsub += 1
+                numbering = [current_main, current_sub, current_subsub]
             
-            # Gerar numeração como string
-            numbering_str = '.'.join(str(n) for n in current_numbering) + '.'
+            numbering_str = '.'.join(str(n) for n in numbering) + '.'
             numbering_map[topic_info['id']] = numbering_str
         
         return numbering_map
@@ -909,13 +905,64 @@ def gerar_banco_proporcional(conn, N):
         if level == 1:
             nome_topico = nome_topico.upper()
 
-        heading_text = f"{numbering} {nome_topico} ({len(questoes_topic)} {'questões' if len(questoes_topic) != 1 else 'questão'})"
+        # Calcular total de questões incluindo filhos
+        def calculate_total_questions_for_topic(topic_id, topic_level3_with_level):
+            total = len(questoes_topic)  # Questões diretamente associadas
+            
+            # Buscar questões dos filhos
+            for child_topic in topic_level3_with_level:
+                if child_topic['id'] != topic_id:  # Não contar o próprio tópico
+                    # Verificar se este tópico filho pertence ao tópico pai
+                    if topic_id in child_topic['hierarchical_path']:
+                        total += len(child_topic['questoes'])
+            
+            return total
+        
+        total_questoes = calculate_total_questions_for_topic(tid, topic_level3_with_level)
+        heading_text = f"{numbering} {nome_topico} ({total_questoes} {'questões' if total_questoes != 1 else 'questão'})"
         document.add_section(WD_SECTION.NEW_PAGE)
         section = document.sections[-1]
         section.header.is_linked_to_previous = False
+        section.footer.is_linked_to_previous = True
         header = section.header
         for p in header.paragraphs:
             p.clear()
+        
+        # Adicionar breadcrumb no cabeçalho para tópicos de nível 1, 2 e 3
+        if level <= 3:
+            # Gerar breadcrumb baseado na numeração do documento
+            breadcrumb_parts = []
+            
+            # Para cada nível no caminho hierárquico, buscar o tópico correspondente
+            for i, path_id in enumerate(hierarchical_path):
+                # Buscar nome do tópico no caminho
+                cursor.execute("SELECT nome FROM topico WHERE id = %s", (path_id,))
+                row = cursor.fetchone()
+                if row:
+                    nome_caminho = row['nome']
+                    
+                    # Encontrar a numeração correspondente para este tópico
+                    # Procurar nos tópicos já processados para encontrar a numeração correta
+                    numero_correspondente = None
+                    for topic_processed in topic_level3_with_level[:idx]:
+                        if topic_processed['id'] == path_id:
+                            numero_correspondente = topic_processed['numbering']
+                            break
+                    
+                    # Se não encontrou, usar a numeração atual para o último nível
+                    if numero_correspondente is None and i == len(hierarchical_path) - 1:
+                        numero_correspondente = numbering
+                    
+                    if numero_correspondente:
+                        breadcrumb_parts.append(f"{numero_correspondente} {nome_caminho}")
+            
+            breadcrumb = ' > '.join(breadcrumb_parts)
+            p = header.paragraphs[0]
+            p.clear()
+            run = p.add_run(breadcrumb)
+            run.bold = True
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        
         document.add_heading(heading_text, level=level)
         document.add_paragraph("")
         
