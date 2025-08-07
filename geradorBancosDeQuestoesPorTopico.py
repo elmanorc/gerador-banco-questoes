@@ -25,6 +25,8 @@ from docx.shared import Inches
 from docx.shared import RGBColor
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.image.exceptions import UnrecognizedImageError
+import mimetypes
 
 # Configurações do banco
 DB_CONFIG = {
@@ -33,6 +35,51 @@ DB_CONFIG = {
     "password": "El@mysql.32",
     "database": "qconcursos"
 }
+
+def verificar_e_adicionar_imagem(document, img_path, max_width=None):
+    """
+    Função auxiliar para verificar e adicionar imagem de forma segura.
+    Retorna True se a imagem foi adicionada com sucesso, False caso contrário.
+    """
+    try:
+        # Verificar se o arquivo existe
+        if not os.path.exists(img_path):
+            print(f"[AVISO] Arquivo de imagem não encontrado: {img_path}")
+            return False
+        
+        # Verificar se é um arquivo válido
+        if not os.path.isfile(img_path):
+            print(f"[AVISO] Caminho não é um arquivo válido: {img_path}")
+            return False
+        
+        # Verificar tamanho do arquivo
+        file_size = os.path.getsize(img_path)
+        if file_size == 0:
+            print(f"[AVISO] Arquivo de imagem vazio: {img_path}")
+            return False
+        
+        # Verificar formato da imagem
+        mime_type, _ = mimetypes.guess_type(img_path)
+        if mime_type and not mime_type.startswith('image/'):
+            print(f"[AVISO] Arquivo não parece ser uma imagem válida: {img_path} (tipo: {mime_type})")
+            return False
+        
+        # Tentar adicionar a imagem
+        if max_width:
+            document.add_picture(img_path, width=max_width)
+        else:
+            document.add_picture(img_path)
+        
+        print(f"[LOG] Imagem adicionada com sucesso: {img_path}")
+        return True
+        
+    except UnrecognizedImageError as e:
+        print(f"[ERRO] Formato de imagem não reconhecido: {img_path}")
+        print(f"[ERRO] Detalhes: {str(e)}")
+        return False
+    except Exception as e:
+        print(f"[ERRO] Erro ao adicionar imagem {img_path}: {str(e)}")
+        return False
 
 def get_connection():
     print("[LOG] Abrindo conexão com o banco de dados...")
@@ -172,6 +219,10 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         parent_names = []
     numbering_str = '.'.join(str(n) for n in numbering) + '.'
    
+    # Calcular questões diretamente associadas ao tópico pai
+    questoes_diretas = questions_by_topic.get(topic_tree['id'], [])
+    total_questoes_filhos = total_questoes - len(questoes_diretas)
+    
     heading_text = f"{numbering_str} {topic_tree['nome']} ({total_questoes} {'questões' if total_questoes != 1 else 'questão'})"
 
     # Cria nova seção apenas para tópicos de nível 1 e 2
@@ -201,9 +252,10 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
 
     document.add_heading(heading_text, level=level)
     document.add_paragraph("")
-    # Adiciona questões deste tópico (sem heading)
-    for q in questions_by_topic.get(topic_tree['id'], []):
-        print(f"[LOG] Adicionando questão {q.get('codigo', '?')} ao tópico {topic_tree['nome']}")
+    
+    # Adiciona questões diretamente associadas ao tópico pai
+    for q in questoes_diretas:
+        print(f"[LOG] Adicionando questão {q.get('codigo', '?')} diretamente ao tópico {topic_tree['nome']}")
         # Determina o nível de dificuldade textual
         dificuldade_val = q.get('dificuldade', 0)
         try:
@@ -252,6 +304,7 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
             add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
         document.add_paragraph("")  # Espaço
         questao_num += 1
+    
     # Adiciona filhos recursivamente
     for idx, child in enumerate(topic_tree.get('children', []), 1):
         print(f"[LOG] Descendo para sub-tópico: {child['nome']} (ID: {child['id']})")
@@ -265,6 +318,7 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
             questao_num=questao_num,
             breadcrumb_raiz=breadcrumb_raiz
         )
+    
     return questao_num
 
 # Função para adicionar rodapé customizado
@@ -339,11 +393,9 @@ def add_enunciado_with_images(document, enunciado_html, codigo_questao, imagens_
             else:
                 img_filename = f"{codigo_questao}_{img_count[0]}.jpeg"
             img_path = os.path.join(imagens_dir, img_filename)
-            if os.path.exists(img_path):
-                max_width = get_max_image_width(document)
-                document.add_picture(img_path, width=max_width)
-            else:
-                document.add_paragraph(f"[Imagem não encontrada: {img_filename}]")
+            max_width = get_max_image_width(document)
+            if not verificar_e_adicionar_imagem(document, img_path, max_width):
+                document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
             img_count[0] += 1
         elif elem.name in ["br"]:
             flush_buffer()
@@ -397,11 +449,9 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
             else:
                 img_filename = f"{codigo_questao}_{img_count[0]}{ext}"
             img_path = os.path.join(imagens_dir, img_filename)
-            if os.path.exists(img_path):
-                max_width = get_max_image_width(document)
-                document.add_picture(img_path, width=max_width)
-            else:
-                document.add_paragraph(f"[Imagem não encontrada: {img_filename}]")
+            max_width = get_max_image_width(document)
+            if not verificar_e_adicionar_imagem(document, img_path, max_width):
+                document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
             img_count[0] += 1
         elif elem.name in ["br"]:
             flush_buffer()
@@ -465,11 +515,9 @@ def add_imagens_enunciado(document, enunciado_html, codigo_questao, imagens_dir)
         else:
             img_filename = f"{codigo_questao}_{img_count}.jpeg"
         img_path = os.path.join(imagens_dir, img_filename)
-        if os.path.exists(img_path):
-            max_width = get_max_image_width(document)
-            document.add_picture(img_path, width=max_width)
-        else:
-            document.add_paragraph(f"[Imagem não encontrada: {img_filename}]")
+        max_width = get_max_image_width(document)
+        if not verificar_e_adicionar_imagem(document, img_path, max_width):
+            document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
         img_count += 1
 
 def clean_xml_illegal_chars(text):
@@ -860,7 +908,14 @@ def gerar_banco_proporcional(conn, N):
     if os.path.exists(img_path):
         print(f"[LOG] Adicionando imagem de capa: {img_path}")
         run = p.add_run()
-        run.add_picture(img_path)
+        try:
+            run.add_picture(img_path)
+            print(f"[LOG] Imagem de capa adicionada com sucesso: {img_path}")
+        except UnrecognizedImageError as e:
+            print(f"[ERRO] Formato de imagem de capa não reconhecido: {img_path}")
+            print(f"[ERRO] Detalhes: {str(e)}")
+        except Exception as e:
+            print(f"[ERRO] Erro ao adicionar imagem de capa {img_path}: {str(e)}")
     else:
         print(f"[LOG] Imagem de capa não encontrada: {img_path}")
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -870,22 +925,7 @@ def gerar_banco_proporcional(conn, N):
     capa_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = capa_title.add_run(f"Banco de Questões - {N} Questões")
     run.bold = True
-    run.font.size = Pt(28)
-    
-    # Adicionar seção de distribuição por área
-    document.add_section(WD_SECTION.NEW_PAGE)
-    section = document.sections[1]
-    section.header.is_linked_to_previous = False
-    header = section.header
-    for p in header.paragraphs:
-        p.clear()
-    
-    # Listar distribuição por área
-    for area, info in area_info.items():
-        p = document.add_paragraph()
-        p.add_run(f"{area}: ").bold = True
-        p.add_run(f"{info['questoes_selecionadas']} questões ({info['proporcao']*100:.0f}%)")
-    
+    run.font.size = Pt(20)
     document.add_paragraph("")
     document.add_paragraph("Sumário:")
     toc_paragraph = document.add_paragraph()
@@ -1040,6 +1080,268 @@ def gerar_banco_proporcional(conn, N):
     
     return output_filename
 
+def gerar_banco_hierarquico_proporcional(conn, N):
+    """
+    Gera um banco de questões com N questões totais, respeitando as proporções das áreas principais
+    e usando a estrutura hierárquica completa da Opção 1.
+    """
+    print(f"[LOG] Gerando banco de questões hierárquico com {N} questões totais...")
+    
+    # Calcular número de questões por área
+    questoes_por_area = {}
+    for area, info in AREAS.items():
+        n_area = int(N * info["proporcao"])
+        questoes_por_area[area] = n_area
+        print(f"[LOG] {area}: {n_area} questões")
+    
+    # Coletar todas as questões selecionadas
+    todas_questoes_ids = []
+    area_info = {}
+    
+    for area, info in AREAS.items():
+        print(f"[LOG] Selecionando questões para {area}...")
+        questoes_area = get_questoes_por_area(conn, info["codigos"], questoes_por_area[area])
+        todas_questoes_ids.extend(questoes_area)
+        area_info[area] = {
+            "codigos": info["codigos"],
+            "proporcao": info["proporcao"],
+            "questoes_selecionadas": len(questoes_area),
+            "questoes_ids": questoes_area
+        }
+        print(f"[LOG] {area}: {len(questoes_area)} questões selecionadas")
+    
+    # Buscar dados completos das questões selecionadas
+    if not todas_questoes_ids:
+        print("[ERRO] Nenhuma questão foi selecionada!")
+        return
+    
+    cursor = conn.cursor(dictionary=True)
+    format_strings = ','.join(['%s'] * len(todas_questoes_ids))
+    query = f"""
+        SELECT q.*, cq.id_topico
+        FROM questaoresidencia q
+        JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
+        WHERE q.questao_id IN ({format_strings})
+        ORDER BY cq.id_topico, q.questao_id
+    """
+    cursor.execute(query, tuple(todas_questoes_ids))
+    questoes_completas = cursor.fetchall()
+    
+    print(f"[LOG] Total de questões recuperadas: {len(questoes_completas)}")
+    
+    # Organizar questões por tópico
+    questions_by_topic = {}
+    for q in questoes_completas:
+        tid = q['id_topico']
+        if tid not in questions_by_topic:
+            questions_by_topic[tid] = []
+        questions_by_topic[tid].append(q)
+    
+    # Recuperar estrutura hierárquica completa dos tópicos selecionados
+    print("[LOG] Recuperando estrutura hierárquica dos tópicos...")
+    
+    # Para cada área, recuperar a árvore hierárquica completa
+    topic_trees = []
+    area_topic_mapping = {}  # Mapeia códigos de área para suas árvores
+    
+    for area, info in AREAS.items():
+        area_trees = []
+        for codigo in info["codigos"]:
+            topic_tree = get_topic_tree_recursive(conn, codigo)
+            area_trees.append(topic_tree)
+            topic_trees.append(topic_tree)
+        area_topic_mapping[area] = area_trees
+    
+    # Função para coletar todos os tópicos da árvore que têm questões
+    def collect_topic_with_questions(topic_tree, questions_by_topic):
+        result = []
+        if topic_tree['id'] in questions_by_topic:
+            result.append(topic_tree)
+        for child in topic_tree.get('children', []):
+            result.extend(collect_topic_with_questions(child, questions_by_topic))
+        return result
+    
+    # Coletar tópicos com questões em ordem hierárquica por área
+    topicos_por_area = {}
+    for area, area_trees in area_topic_mapping.items():
+        topicos_area = []
+        for topic_tree in area_trees:
+            topicos_area.extend(collect_topic_with_questions(topic_tree, questions_by_topic))
+        topicos_por_area[area] = topicos_area
+    
+    print(f"[LOG] Tópicos organizados por área: {len(topicos_por_area)}")
+    
+    # Gerar documento
+    document = Document()
+    style = document.styles['Normal']
+    font = style.font
+    font.name = 'Calibri'
+    font.size = Pt(12)
+    paragraph_format = style.paragraph_format
+    paragraph_format.space_after = Pt(3)
+    paragraph_format.space_before = Pt(0)
+    paragraph_format.line_spacing = 1
+    
+    # Configurar cabeçalho da capa
+    section_capa = document.sections[0]
+    section_capa.header.is_linked_to_previous = False
+    header_capa = section_capa.first_page_header
+    for p in header_capa.paragraphs:
+        p.clear()
+    img_path = os.path.join(os.path.dirname(__file__), 'logotipo_frase.png')
+    p = header_capa.paragraphs[0]
+    p.clear()
+    if os.path.exists(img_path):
+        print(f"[LOG] Adicionando imagem de capa: {img_path}")
+        run = p.add_run()
+        try:
+            run.add_picture(img_path)
+            print(f"[LOG] Imagem de capa adicionada com sucesso: {img_path}")
+        except UnrecognizedImageError as e:
+            print(f"[ERRO] Formato de imagem de capa não reconhecido: {img_path}")
+            print(f"[ERRO] Detalhes: {str(e)}")
+        except Exception as e:
+            print(f"[ERRO] Erro ao adicionar imagem de capa {img_path}: {str(e)}")
+    else:
+        print(f"[LOG] Imagem de capa não encontrada: {img_path}")
+    p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    
+    # Título principal
+    capa_title = document.add_paragraph()
+    capa_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = capa_title.add_run(f"Banco de Questões - {N} Questões")
+    run.bold = True
+    run.font.size = Pt(28)
+    
+    # Adicionar seção de distribuição por área
+    document.add_section(WD_SECTION.NEW_PAGE)
+    section = document.sections[1]
+    section.header.is_linked_to_previous = False
+    header = section.header
+    for p in header.paragraphs:
+        p.clear()
+    
+    # Listar distribuição por área
+    for area, info in area_info.items():
+        p = document.add_paragraph()
+        p.add_run(f"{area}: ").bold = True
+        p.add_run(f"{info['questoes_selecionadas']} questões ({info['proporcao']*100:.0f}%)")
+    
+    document.add_paragraph("")
+    document.add_paragraph("Sumário:")
+    toc_paragraph = document.add_paragraph()
+    add_toc(toc_paragraph)
+    
+    # Adicionar questões organizadas por área e estrutura hierárquica
+    questao_num = 1
+    area_number = 1
+    
+    for area, info in AREAS.items():
+        print(f"[LOG] Processando área: {area}")
+        
+        # Verificar se a área tem questões
+        if area not in topicos_por_area or not topicos_por_area[area]:
+            print(f"[LOG] Área {area} não tem questões, pulando...")
+            continue
+        
+        # Para áreas com múltiplos códigos (como Saúde Coletiva), criar subseções
+        if len(info["codigos"]) > 1:
+            # Área com múltiplos tópicos pai
+            print(f"[LOG] Área {area} tem múltiplos tópicos pai: {info['codigos']}")
+            
+            # Criar seção principal da área
+            document.add_section(WD_SECTION.NEW_PAGE)
+            section = document.sections[-1]
+            section.header.is_linked_to_previous = False
+            section.footer.is_linked_to_previous = True
+            header = section.header
+            for p in header.paragraphs:
+                p.clear()
+            
+            # Breadcrumb para área principal
+            p = header.paragraphs[0]
+            p.clear()
+            run = p.add_run(f"{area_number}. {area}")
+            run.bold = True
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            
+            # Título da área principal
+            total_questoes_area = sum(len(questions_by_topic.get(topic['id'], [])) for topic in topicos_por_area[area])
+            heading_text = f"{area_number}. {area} ({total_questoes_area} {'questões' if total_questoes_area != 1 else 'questão'})"
+            document.add_heading(heading_text, level=1)
+            document.add_paragraph("")
+            
+            # Processar cada tópico pai da área
+            for idx, codigo in enumerate(info["codigos"], 1):
+                # Buscar árvore do tópico pai
+                topic_tree = None
+                for tree in area_topic_mapping[area]:
+                    if tree['id'] == codigo:
+                        topic_tree = tree
+                        break
+                
+                if not topic_tree:
+                    print(f"[LOG] Árvore não encontrada para código {codigo}")
+                    continue
+                
+                # Buscar nome do tópico pai
+                cursor.execute("SELECT nome FROM topico WHERE id = %s", (codigo,))
+                row = cursor.fetchone()
+                nome_topico_pai = row['nome'] if row else f"Tópico {codigo}"
+                
+                print(f"[LOG] Processando tópico pai: {nome_topico_pai} (código {codigo})")
+                
+                # Processar estrutura hierárquica completa do tópico pai sem criar título duplicado
+                # A função add_topic_sections_recursive já criará o título correto
+                questao_num = add_topic_sections_recursive(
+                    document,
+                    topic_tree,
+                    questions_by_topic,
+                    level=2,
+                    numbering=[area_number, idx],
+                    parent_names=[area],
+                    questao_num=questao_num,
+                    breadcrumb_raiz=f"{area_number}. {area}"
+                )
+            
+            area_number += 1
+            
+        else:
+            # Área com um único tópico pai
+            codigo = info["codigos"][0]
+            topic_tree = area_topic_mapping[area][0]
+            
+            print(f"[LOG] Processando área {area} com tópico pai: {topic_tree['nome']} (código {codigo})")
+            
+            # Processar estrutura hierárquica completa sem criar título duplicado
+            # A função add_topic_sections_recursive já criará o título correto
+            questao_num = add_topic_sections_recursive(
+                document,
+                topic_tree,
+                questions_by_topic,
+                level=1,
+                numbering=[area_number],
+                parent_names=[],
+                questao_num=questao_num,
+                breadcrumb_raiz=f"{area_number}. {area}"
+            )
+            
+            area_number += 1
+    
+    # Adicionar rodapé
+    add_footer_with_text_and_page_number(document)
+    
+    # Salvar documento
+    from datetime import datetime
+    data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"banco_questoes_hierarquico_{N}_{data_atual}.docx"
+    
+    document.save(output_filename)
+    print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
+    print(f"[LOG] Total de questões no banco: {len(questoes_completas)}")
+    
+    return output_filename
+
 def main(id_topico_raiz, output_filename, amostra=1.0):
     print(f"[LOG] Iniciando main com id_topico_raiz={id_topico_raiz}, output_filename={output_filename}, amostra={amostra}")
     conn = get_connection()
@@ -1158,7 +1460,14 @@ def main(id_topico_raiz, output_filename, amostra=1.0):
         p.clear()
         if os.path.exists(img_path):
             run = p.add_run()
-            run.add_picture(img_path)
+            try:
+                run.add_picture(img_path)
+                print(f"[LOG] Imagem de sumário adicionada com sucesso: {img_path}")
+            except UnrecognizedImageError as e:
+                print(f"[ERRO] Formato de imagem de sumário não reconhecido: {img_path}")
+                print(f"[ERRO] Detalhes: {str(e)}")
+            except Exception as e:
+                print(f"[ERRO] Erro ao adicionar imagem de sumário {img_path}: {str(e)}")
         p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
         document.add_paragraph("")
         # Buscar nome do tópico raiz
@@ -1237,8 +1546,9 @@ if __name__ == "__main__":
     print("=== GERADOR DE BANCOS DE QUESTÕES ===")
     print("1. Gerar banco por tópico específico")
     print("2. Gerar banco proporcional por área")
+    print("3. Gerar banco hierárquico proporcional por área")
     
-    opcao = input("Escolha a opção (1 ou 2): ").strip()
+    opcao = input("Escolha a opção (1, 2 ou 3): ").strip()
     
     if opcao == "1":
         # Modo original - por tópico específico
@@ -1263,6 +1573,22 @@ if __name__ == "__main__":
         conn = get_connection()
         print("[LOG] Conexão com o banco estabelecida.")
         gerar_banco_proporcional(conn, N)
+        conn.close()
+    
+    elif opcao == "3":
+        # Novo modo - hierárquico proporcional por área
+        try:
+            N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
+            if N <= 0:
+                print("Erro: N deve ser um número positivo!")
+                exit(1)
+        except ValueError:
+            print("Erro: N deve ser um número inteiro!")
+            exit(1)
+        
+        conn = get_connection()
+        print("[LOG] Conexão com o banco estabelecida.")
+        gerar_banco_hierarquico_proporcional(conn, N)
         conn.close()
     
     else:
