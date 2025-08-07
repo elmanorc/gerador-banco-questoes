@@ -1,0 +1,8 @@
+# Arquivos do Word
+*.docx
+
+# Arquivos temporários do Word
+~$*.docx
+
+# Outros arquivos que podem ser gerados pelo script
+banco_questoes_*.docx
