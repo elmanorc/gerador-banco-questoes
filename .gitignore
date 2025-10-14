@@ -1,6 +1,9 @@
 # Arquivos do Word
 *.docx
 
+# Arquivos PDF
+*.pdf
+
 # Arquivos temporários do Word
 ~$*.docx
 
