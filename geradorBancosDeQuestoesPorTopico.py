@@ -1081,30 +1081,30 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     
     return output_filename
 
-def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permitir_repeticao=True):
+def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True):
     """
-    Gera um banco de questões de uma área específica baseada no código do tópico raiz.
+    Gera um banco de questões de um tópico específico (qualquer nível na hierarquia).
     
     Args:
         conn: Conexão com o banco de dados
-        id_topico_raiz: ID do tópico raiz que define a área específica
+        id_topico: ID do tópico que define a área específica (qualquer nível)
         total_questoes: Número total de questões desejadas
         permitir_repeticao: Se permite questões repetidas
     """
-    print(f"[LOG] Gerando banco de questões para área específica - Tópico raiz: {id_topico_raiz}, {total_questoes} questões...")
+    print(f"[LOG] Gerando banco de questões para tópico específico - Tópico: {id_topico}, {total_questoes} questões...")
     
     cursor = conn.cursor(dictionary=True)
     
-    # Primeiro, verificar se o tópico raiz existe e obter seu nome
-    cursor.execute("SELECT id, nome FROM topico WHERE id = %s", (id_topico_raiz,))
-    topico_raiz_info = cursor.fetchone()
+    # Primeiro, verificar se o tópico existe e obter seu nome
+    cursor.execute("SELECT id, nome FROM topico WHERE id = %s", (id_topico,))
+    topico_info = cursor.fetchone()
     
-    if not topico_raiz_info:
-        print(f"[ERRO] Tópico raiz com ID {id_topico_raiz} não encontrado!")
+    if not topico_info:
+        print(f"[ERRO] Tópico com ID {id_topico} não encontrado!")
         return None
     
-    nome_area = topico_raiz_info['nome']
-    print(f"[LOG] Área selecionada: {nome_area}")
+    nome_topico = topico_info['nome']
+    print(f"[LOG] Tópico selecionado: {nome_topico}")
     
     # Informar comportamento de seções baseado no número de questões
     if total_questoes <= 500:
@@ -1112,139 +1112,88 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
     else:
         print(f"[LOG] Banco EXPANDIDO ({total_questoes} questões): quebras de página para tópicos de NÍVEIS 1, 2 e 3")
     
-    # Mapear tópico raiz para área médica (mesmo mapeamento do modo 1)
-    topico_raiz_para_area = {
-        33: 'Cirurgia',
-        100: 'Clínica Médica', 
-        48: 'Pediatria',
-        183: 'Ginecologia',
-        218: 'Obstetrícia',
-        29: 'Medicina Preventiva'
-    }
+    # Buscar questões diretamente associadas ao tópico especificado
+    # Incluir questões do tópico e de todos os seus descendentes
+    print(f"[LOG] Buscando questões associadas ao tópico {id_topico} e seus descendentes...")
     
-    # Determinar qual área corresponde ao tópico raiz escolhido
-    area_escolhida = topico_raiz_para_area.get(id_topico_raiz)
-    if not area_escolhida:
-        print(f"[ERRO] Tópico raiz {id_topico_raiz} não mapeado para uma área médica conhecida!")
+    # Primeiro, obter todos os descendentes do tópico (incluindo ele próprio)
+    cursor.execute("""
+        WITH RECURSIVE topico_descendentes AS (
+            SELECT id, nome, 1 as nivel
+            FROM topico 
+            WHERE id = %s
+            
+            UNION ALL
+            
+            SELECT t.id, t.nome, td.nivel + 1
+            FROM topico t
+            INNER JOIN topico_descendentes td ON t.id_pai = td.id
+            WHERE td.nivel < 10
+        )
+        SELECT id FROM topico_descendentes
+    """, (id_topico,))
+    
+    descendentes = cursor.fetchall()
+    ids_descendentes = [d['id'] for d in descendentes]
+    
+    print(f"[LOG] Tópico {id_topico} tem {len(ids_descendentes)} descendentes (incluindo ele próprio)")
+    
+    if not ids_descendentes:
+        print(f"[ERRO] Não foi possível obter descendentes do tópico {id_topico}")
         return None
     
-    print(f"[LOG] Área escolhida baseada no tópico raiz {id_topico_raiz}: {area_escolhida}")
+    # Buscar questões associadas a qualquer um dos tópicos descendentes
+    format_strings = ','.join(['%s'] * len(ids_descendentes))
     
-    # Usar exatamente o mesmo mecanismo do modo 1, mas com cotas ajustadas
-    # Área escolhida = 100% (total_questoes), outras = 0%
-    cotas_area_especifica = {
-        'Cirurgia': total_questoes if area_escolhida == 'Cirurgia' else 0,
-        'Clínica Médica': total_questoes if area_escolhida == 'Clínica Médica' else 0,
-        'Pediatria': total_questoes if area_escolhida == 'Pediatria' else 0,
-        'Ginecologia': total_questoes if area_escolhida == 'Ginecologia' else 0,
-        'Obstetrícia': total_questoes if area_escolhida == 'Obstetrícia' else 0,
-        'Medicina Preventiva': total_questoes if area_escolhida == 'Medicina Preventiva' else 0
-    }
-    
-    print(f"[LOG] Cotas ajustadas para área específica: {cotas_area_especifica}")
-    print(f"[LOG] Usando EXATAMENTE o mesmo mecanismo do modo 1 com ordenação SHA2 determinística")
-    
-    # MESMA CONSULTA SQL DO MODO 1, apenas com cotas ajustadas
     query_questoes = f"""
-    WITH cotas AS (
-        SELECT 33   AS topico_id_raiz, 'Cirurgia'            AS area, {cotas_area_especifica['Cirurgia']} AS qtd
-        UNION ALL
-        SELECT 100  AS topico_id_raiz, 'Clínica Médica'      AS area, {cotas_area_especifica['Clínica Médica']}
-        UNION ALL
-        SELECT 48   AS topico_id_raiz, 'Pediatria'           AS area, {cotas_area_especifica['Pediatria']}
-        UNION ALL
-        SELECT 183  AS topico_id_raiz, 'Ginecologia'         AS area, {cotas_area_especifica['Ginecologia']}
-        UNION ALL
-        SELECT 218  AS topico_id_raiz, 'Obstetrícia'         AS area, {cotas_area_especifica['Obstetrícia']}
-        UNION ALL
-        SELECT 29   AS topico_id_raiz, 'Medicina Preventiva' AS area, {cotas_area_especifica['Medicina Preventiva']}
-    ),
-    ordenadas AS (
-        SELECT 
-            q.*,
-            ROW_NUMBER() OVER (
-                PARTITION BY c.area
-                ORDER BY SHA2(CONCAT(q.questao_id, 'SEMENTE_FIXA'), 256)
-            ) AS ordem,
-            c.qtd
-        FROM questaoresidencia q
-        JOIN cotas c ON q.area = c.area
-        WHERE CHAR_LENGTH(q.comentario) >= 500 AND q.ano >= 2018
-    )
-    SELECT 
-        o.*
-    FROM ordenadas o
-    WHERE o.ordem <= o.qtd
-    ORDER BY o.area, o.ordem
+    SELECT DISTINCT
+        q.*,
+        ROW_NUMBER() OVER (
+            ORDER BY SHA2(CONCAT(q.questao_id, 'SEMENTE_FIXA'), 256)
+        ) AS ordem
+    FROM questaoresidencia q
+    INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
+    WHERE cq.id_topico IN ({format_strings})
+      AND CHAR_LENGTH(q.comentario) >= 500 
+      AND q.ano >= 2018
+    ORDER BY ordem
+    LIMIT %s
     """
     
-    print(f"[LOG] Executando consulta SQL IDÊNTICA ao modo 1 (área específica: {area_escolhida})...")
-    cursor.execute(query_questoes)
+    print(f"[LOG] Executando consulta SQL para buscar questões do tópico {id_topico}...")
+    cursor.execute(query_questoes, tuple(ids_descendentes + [total_questoes]))
     questoes_selecionadas = cursor.fetchall()
     
     print(f"[LOG] Total de questões selecionadas: {len(questoes_selecionadas)}")
     
     if len(questoes_selecionadas) == 0:
-        print(f"[ERRO] Nenhuma questão encontrada para o tópico raiz {id_topico_raiz}")
+        print(f"[ERRO] Nenhuma questão encontrada para o tópico {id_topico}")
         return None
     
     
-    # Usar a mesma lógica do modo 1 para mapear questões aos tópicos
-    print("[LOG] Distribuição por área das questões selecionadas:")
-    distribuicao_selecionadas = {}
-    for q in questoes_selecionadas:
-        area = q['area']
-        distribuicao_selecionadas[area] = distribuicao_selecionadas.get(area, 0) + 1
+    # Mapear questões aos tópicos mais específicos possíveis
+    print("[LOG] Mapeando questões aos tópicos mais específicos...")
     
-    for area, count in distribuicao_selecionadas.items():
-        print(f"  - {area}: {count} questões")
-    
-    # Mapear áreas para tópicos raiz (mesmo mapeamento do modo 1)
-    area_para_topico_raiz = {
-        'Cirurgia': 33,
-        'Clínica Médica': 100,
-        'Pediatria': 48,
-        'Ginecologia': 183,
-        'Obstetrícia': 218,
-        'Medicina Preventiva': 29
-    }
-    
-    print(f"[LOG] Mapeamento área -> tópico raiz: {area_para_topico_raiz}")
-    
-    # Associar cada questão ao seu tópico raiz baseado na área (igual ao modo 1)
-    questoes_sem_topico = 0
-    for q in questoes_selecionadas:
-        area = q['area']
-        topico_raiz = area_para_topico_raiz.get(area)
-        if topico_raiz:
-            q['id_topico'] = topico_raiz
-        else:
-            print(f"[ERRO] Área '{area}' não mapeada para tópico raiz")
-            q['id_topico'] = None
-            questoes_sem_topico += 1
-    
-    if questoes_sem_topico == 0:
-        print(f"[LOG] Todas as questões associadas aos tópicos raiz por área")
-    else:
-        print(f"[ERRO] {questoes_sem_topico} questões não puderam ser associadas a tópicos")
-    
-    # Obter questões com classificações mais específicas para melhor organização (igual ao modo 1)
     questao_ids = [q['questao_id'] for q in questoes_selecionadas]
-    format_strings = ','.join(['%s'] * len(questao_ids))
+    
+    # Buscar classificações específicas das questões selecionadas
+    format_strings_questoes = ','.join(['%s'] * len(questao_ids))
+    format_strings_topicos = ','.join(['%s'] * len(ids_descendentes))
     
     query_topicos_especificos = f"""
     SELECT DISTINCT cq.id_topico, cq.id_questao
     FROM classificacao_questao cq
-    WHERE cq.id_questao IN ({format_strings})
+    WHERE cq.id_questao IN ({format_strings_questoes})
+      AND cq.id_topico IN ({format_strings_topicos})
     ORDER BY cq.id_questao, cq.id_topico
     """
     
-    cursor.execute(query_topicos_especificos, tuple(questao_ids))
+    cursor.execute(query_topicos_especificos, tuple(questao_ids + ids_descendentes))
     classificacoes_especificas = cursor.fetchall()
     
     print(f"[LOG] Classificações específicas encontradas: {len(classificacoes_especificas)}")
     
-    # Criar mapeamento de questão -> tópicos específicos para melhor organização
+    # Criar mapeamento de questão -> tópicos específicos
     questao_topicos_especificos = {}
     for classificacao in classificacoes_especificas:
         questao_id = classificacao['id_questao']
@@ -1253,25 +1202,34 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
             questao_topicos_especificos[questao_id] = []
         questao_topicos_especificos[questao_id].append(topico_id)
     
-    # Usar tópico mais específico se disponível, senão manter tópico raiz (igual ao modo 1)
+    # Associar cada questão ao tópico mais específico disponível
+    questoes_sem_topico = 0
     for q in questoes_selecionadas:
         topicos_especificos = questao_topicos_especificos.get(q['questao_id'], [])
         if topicos_especificos:
-            # Usar o primeiro tópico específico encontrado para melhor organização
+            # Usar o primeiro tópico específico encontrado
             q['id_topico'] = topicos_especificos[0]
-        # Se não houver tópico específico, mantém o tópico raiz já definido
+        else:
+            # Fallback: usar o tópico raiz especificado
+            q['id_topico'] = id_topico
+            questoes_sem_topico += 1
+    
+    if questoes_sem_topico == 0:
+        print(f"[LOG] Todas as questões mapeadas para tópicos específicos")
+    else:
+        print(f"[LOG] {questoes_sem_topico} questões mapeadas para o tópico raiz (fallback)")
     
     questoes_com_topico = questoes_selecionadas
     print(f"[LOG] Questões com tópico associado: {len(questoes_com_topico)}")
     
-    # Verificar se obtivemos exatamente o número esperado (mesma lógica do modo 1)
+    # Verificar se obtivemos o número esperado de questões
     if len(questoes_com_topico) < total_questoes:
         diferenca = total_questoes - len(questoes_com_topico)
         print(f"[AVISO] Obtidas apenas {len(questoes_com_topico)} questões de {total_questoes} solicitadas.")
         print(f"[AVISO] Diferença: {diferenca} questões. Isso pode indicar que não há questões suficientes")
-        print(f"[AVISO] na área que atendam aos critérios (comentário ≥500 chars, ano ≥2018, etc.)")
+        print(f"[AVISO] no tópico que atendam aos critérios (comentário ≥500 chars, ano ≥2018, etc.)")
     
-    # Mostrar distribuição final por área (mesma lógica do modo 1)
+    # Mostrar distribuição final por área (informativo)
     distribuicao_final = {}
     for q in questoes_com_topico:
         area = q['area']
@@ -1279,11 +1237,9 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
     
     print("[LOG] Distribuição final por área:")
     for area, count in distribuicao_final.items():
-        cota_esperada = cotas_area_especifica.get(area, 0)
-        status = "✅" if count == cota_esperada else f"❌ (esperado: {cota_esperada})"
-        print(f"  - {area}: {count} questões {status}")
+        print(f"  - {area}: {count} questões")
     
-    # Mostrar status final como no modo 1
+    # Mostrar status final
     if len(questoes_com_topico) == total_questoes:
         print(f"✅ [SUCESSO] Exatamente {total_questoes} questões obtidas!")
     else:
@@ -1342,7 +1298,7 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
     
     topicos_info = {t['id']: t for t in cursor.fetchall()}
     
-    # Construir árvore hierárquica a partir do tópico raiz
+    # Construir árvore hierárquica a partir do tópico especificado
     def build_topic_tree(topico_id, nivel_atual=1, max_nivel=4):
         if topico_id not in topicos_info:
             return None
@@ -1369,14 +1325,14 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
         
         return tree_node
     
-    # Construir árvore a partir do tópico raiz
-    topic_tree = build_topic_tree(id_topico_raiz)
+    # Construir árvore a partir do tópico especificado
+    topic_tree = build_topic_tree(id_topico)
     
     if not topic_tree:
-        print(f"[ERRO] Não foi possível construir hierarquia para o tópico raiz {id_topico_raiz}")
+        print(f"[ERRO] Não foi possível construir hierarquia para o tópico {id_topico}")
         return None
     
-    print(f"[LOG] Árvore hierárquica construída a partir do tópico raiz: {topic_tree['nome']}")
+    print(f"[LOG] Árvore hierárquica construída a partir do tópico: {topic_tree['nome']}")
     
     # Reorganizar questões para tópicos de nível 4
     def get_all_descendants(topico_id):
@@ -1476,7 +1432,7 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
     
     capa_title = document.add_paragraph()
     capa_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = capa_title.add_run(f"Banco de Questões - {nome_area}")
+    run = capa_title.add_run(f"Banco de Questões - {nome_topico}")
     run.bold = True
     run.font.size = Pt(24)
     
@@ -1555,7 +1511,7 @@ def gerar_banco_area_especifica(conn, id_topico_raiz, total_questoes=1000, permi
     
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nome_arquivo_limpo = nome_area.replace(" ", "_").replace("/", "_")
+    nome_arquivo_limpo = nome_topico.replace(" ", "_").replace("/", "_").replace("\\", "_")
     output_filename = f"banco_questoes_{nome_arquivo_limpo}_{len(questoes_com_topico)}_{data_atual}.docx"
     
     document.save(output_filename)
@@ -1575,7 +1531,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
         permitir_repeticao: Se permite questões repetidas
     """
     print(f"[LOG] Gerando banco de questões para {instituicao}...")
-    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%' ou 'REVALIDA NACIONAL', ano >= 2016, comentário >= 400 caracteres")
+    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= 2016, comentário >= 400 caracteres")
     print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
     
     cursor = conn.cursor(dictionary=True)
@@ -1774,11 +1730,20 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
     # Encontrar tópicos raiz
     topicos_raiz = []
     for topico_id in topicos_completos:
+        if topico_id not in topicos_info:
+            print(f"[AVISO] Tópico ID {topico_id} não encontrado em topicos_info, pulando...")
+            continue
         topico = topicos_info[topico_id]
         if topico['id_pai'] is None or topico['id_pai'] not in topicos_completos:
             topicos_raiz.append(topico_id)
     
     print(f"[LOG] Tópicos raiz encontrados: {len(topicos_raiz)}")
+    
+    if len(topicos_raiz) == 0:
+        print("[ERRO] Nenhum tópico raiz encontrado. Verificando dados...")
+        print(f"[DEBUG] topicos_completos: {len(topicos_completos)}")
+        print(f"[DEBUG] topicos_info: {len(topicos_info)}")
+        return None
     
     # Construir árvores para cada tópico raiz
     topic_trees = []
@@ -1999,7 +1964,7 @@ if __name__ == "__main__":
     print()
     print("Escolha o modo de geração:")
     print("1 - Banco completo com 6 áreas médicas (Modo original)")
-    print("2 - Banco de área específica por tópico raiz")
+    print("2 - Banco de tópico específico (qualquer nível na hierarquia)")
     print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE) - Ano 2016 em diante")
     print()
     
@@ -2046,8 +2011,8 @@ if __name__ == "__main__":
         gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao)
         
     elif modo == 2:
-        # MODO 2: Banco de área específica
-        print(f"\n[LOG] MODO 2: Gerando banco de área específica")
+        # MODO 2: Banco de tópico específico (qualquer nível)
+        print(f"\n[LOG] MODO 2: Gerando banco de tópico específico")
         print()
         print("Códigos dos tópicos raiz das principais áreas:")
         print("  33  - Cirurgia")
@@ -2057,23 +2022,24 @@ if __name__ == "__main__":
         print("  218 - Obstetrícia")
         print("  29  - Medicina Preventiva")
         print()
-        print("Ou informe o código de qualquer outro tópico raiz desejado.")
+        print("Ou informe o código de qualquer tópico (raiz ou sub-tópico) desejado.")
+        print("O sistema irá buscar questões associadas ao tópico e todos os seus descendentes.")
         print()
         
         try:
-            id_topico_raiz = int(input("Digite o código do tópico raiz: "))
-            if id_topico_raiz <= 0:
+            id_topico = int(input("Digite o código do tópico: "))
+            if id_topico <= 0:
                 print("Erro: O código do tópico deve ser um número positivo!")
                 exit(1)
         except ValueError:
             print("Erro: Digite um código válido (número inteiro)!")
             exit(1)
         
-        print(f"[LOG] Tópico raiz selecionado: {id_topico_raiz}")
-        print(f"[LOG] Gerando {N} questões da área específica...")
+        print(f"[LOG] Tópico selecionado: {id_topico}")
+        print(f"[LOG] Gerando {N} questões do tópico e seus descendentes...")
         print()
         
-        resultado = gerar_banco_area_especifica(conn, id_topico_raiz, N, permitir_repeticao=permitir_repeticao)
+        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
