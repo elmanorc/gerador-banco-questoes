@@ -404,25 +404,97 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
     html = markdown(comentario_md)
     soup = BeautifulSoup(html, "html.parser")
     img_count = [1]
-    buffer = []
 
-    def flush_buffer():
-        if buffer:
-            text = ''.join(buffer).replace('\xa0', ' ')
-            text = re.sub(r'\n{3,}', '\n\n', text)
-            text = re.sub(r'(\n\s*\n)+', '\n\n', text)
-            document.add_paragraph(clean_xml_illegal_chars(text.strip()))
-            buffer.clear()
+    def add_formatted_paragraph(text, level=0, is_bullet=False, bullet_char="•"):
+        """Adiciona um parágrafo formatado com indentação e formatação"""
+        if not text or not text.strip():
+            return
+            
+        # Limpar texto
+        text = clean_xml_illegal_chars(text.strip())
+        
+        # Criar parágrafo
+        p = document.add_paragraph()
+        
+        # Aplicar indentação baseada no nível
+        if level > 0:
+            p.paragraph_format.left_indent = Inches(0.25 * level)
+        
+        # Adicionar bullet se necessário
+        if is_bullet:
+            run = p.add_run(f"{bullet_char} ")
+            run.bold = True
+        
+        # Processar texto com formatação (negrito, etc.)
+        add_formatted_text(p, text)
+
+    def add_formatted_text(paragraph, text):
+        """Adiciona texto com formatação (negrito, etc.)"""
+        # Processar texto em negrito (**texto**)
+        parts = re.split(r'(\*\*.*?\*\*)', text)
+        
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                # Texto em negrito
+                bold_text = part[2:-2]  # Remove **
+                run = paragraph.add_run(bold_text)
+                run.bold = True
+            else:
+                # Texto normal
+                if part.strip():
+                    paragraph.add_run(part)
+
+    def process_list_item(li_element, level=0):
+        """Processa um item de lista com indentação apropriada"""
+        # Coletar texto do item (apenas texto direto, não sublistas)
+        item_text = []
+        
+        for child in li_element.children:
+            if isinstance(child, str):
+                text = child.replace('\xa0', ' ').strip()
+                if text:
+                    item_text.append(text)
+            elif child.name in ['strong', 'b']:
+                # Texto em negrito
+                bold_text = child.get_text().strip()
+                if bold_text:
+                    item_text.append(f"**{bold_text}**")
+            elif child.name in ['em', 'i']:
+                # Texto em itálico
+                italic_text = child.get_text().strip()
+                if italic_text:
+                    item_text.append(f"*{italic_text}*")
+            elif child.name not in ['ul', 'ol']:
+                # Outros elementos (exceto listas)
+                text = child.get_text().strip()
+                if text:
+                    item_text.append(text)
+        
+        # Adicionar o item da lista (se houver texto)
+        if item_text:
+            full_text = ' '.join(item_text)
+            bullet_char = "•" if level == 0 else "▪" if level == 1 else "▫"
+            add_formatted_paragraph(full_text, level, is_bullet=True, bullet_char=bullet_char)
+        
+        # Processar sublistas APÓS o texto do item
+        for child in li_element.children:
+            if child.name in ['ul', 'ol']:
+                process_list(child, level + 1)
+
+    def process_list(list_element, level=0):
+        """Processa uma lista (ul ou ol)"""
+        # Processar apenas itens diretos (não recursivos)
+        for li in list_element.find_all('li', recursive=False):
+            process_list_item(li, level)
 
     def process_element(elem):
         if isinstance(elem, Comment):
             return
-        if isinstance(elem, str):
-            text = elem.replace('\xa0', ' ')
+        elif isinstance(elem, str):
+            text = elem.replace('\xa0', ' ').strip()
             if text:
-                buffer.append(text)
+                add_formatted_paragraph(text)
         elif elem.name == "img":
-            flush_buffer()
             src = elem.get("src", "")
             ext = os.path.splitext(src)[1].split("?")[0]
             if not ext:
@@ -434,45 +506,36 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
             img_path = os.path.join(imagens_dir, img_filename)
             max_width = get_max_image_width(document)
             if not verificar_e_adicionar_imagem(document, img_path, max_width):
-                document.add_paragraph(f" ou inválida: {img_filename}]")
+                document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
             img_count[0] += 1
         elif elem.name in ["br"]:
-            flush_buffer()
+            # Quebra de linha
+            document.add_paragraph("")
         elif elem.name in ["div", "p"]:
-            flush_buffer()
+            # Processar conteúdo do parágrafo/div
             for child in elem.children:
                 process_element(child)
-            flush_buffer()
         elif elem.name in ["ul", "ol"]:
-            for child in elem.children:
-                process_element(child)
-        elif elem.name == "li":
-            item_text = []
-            for child in elem.children:
-                if isinstance(child, str):
-                    item_text.append(child.replace('\xa0', ' '))
-                else:
-                    # Recursivamente pega o texto dos filhos
-                    sub_buffer = []
-                    def collect_text(e):
-                        if isinstance(e, str):
-                            sub_buffer.append(e.replace('\xa0', ' '))
-                        else:
-                            for sub_e in e.children:
-                                collect_text(sub_e)
-                    collect_text(child)
-                    item_text.append(''.join(sub_buffer))
-            document.add_paragraph(clean_xml_illegal_chars("• " + ''.join(item_text).strip()))
-        elif elem.name == "span":
-            for child in elem.children:
-                process_element(child)
+            # Processar lista
+            process_list(elem, 0)
+        elif elem.name == "strong" or elem.name == "b":
+            # Texto em negrito
+            bold_text = elem.get_text().strip()
+            if bold_text:
+                add_formatted_paragraph(f"**{bold_text}**")
+        elif elem.name == "em" or elem.name == "i":
+            # Texto em itálico
+            italic_text = elem.get_text().strip()
+            if italic_text:
+                add_formatted_paragraph(f"*{italic_text}*")
         else:
+            # Outros elementos - processar filhos
             for child in elem.children:
                 process_element(child)
 
+    # Processar todos os elementos
     for elem in soup.contents:
         process_element(elem)
-    flush_buffer()
 
 def get_max_image_width(document):
     """
@@ -927,14 +990,19 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
             # Este é um tópico de nível 4, coletar questões de todos os descendentes
             all_descendants = get_all_descendants(tree_node['id'])
             todas_questoes = []
+            questoes_ids_unicos = set()  # Para evitar duplicatas
             
             for desc_id in all_descendants:
                 if desc_id in questions_by_topic:
-                    todas_questoes.extend(questions_by_topic[desc_id])
+                    for questao in questions_by_topic[desc_id]:
+                        # Verificar se a questão já foi adicionada (evitar duplicatas)
+                        if questao['questao_id'] not in questoes_ids_unicos:
+                            todas_questoes.append(questao)
+                            questoes_ids_unicos.add(questao['questao_id'])
             
             if todas_questoes:
                 reorganized_questions[tree_node['id']] = todas_questoes
-                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas")
+                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas (duplicatas removidas)")
             
         elif tree_node['nivel'] < 4:
             # Para níveis menores que 4, manter questões diretas e processar filhos
@@ -1354,14 +1422,19 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
             # Este é um tópico de nível 4, coletar questões de todos os descendentes
             all_descendants = get_all_descendants(tree_node['id'])
             todas_questoes = []
+            questoes_ids_unicos = set()  # Para evitar duplicatas
             
             for desc_id in all_descendants:
                 if desc_id in questions_by_topic:
-                    todas_questoes.extend(questions_by_topic[desc_id])
+                    for questao in questions_by_topic[desc_id]:
+                        # Verificar se a questão já foi adicionada (evitar duplicatas)
+                        if questao['questao_id'] not in questoes_ids_unicos:
+                            todas_questoes.append(questao)
+                            questoes_ids_unicos.add(questao['questao_id'])
             
             if todas_questoes:
                 reorganized_questions[tree_node['id']] = todas_questoes
-                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas")
+                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas (duplicatas removidas)")
             
         elif tree_node['nivel'] < 4:
             # Para níveis menores que 4, manter questões diretas e processar filhos
@@ -1820,12 +1893,19 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
         if tree_node['nivel'] == 4:
             all_descendants = get_all_descendants(tree_node['id'])
             todas_questoes = []
+            questoes_ids_unicos = set()  # Para evitar duplicatas
+            
             for desc_id in all_descendants:
                 if desc_id in questions_by_topic:
-                    todas_questoes.extend(questions_by_topic[desc_id])
+                    for questao in questions_by_topic[desc_id]:
+                        # Verificar se a questão já foi adicionada (evitar duplicatas)
+                        if questao['questao_id'] not in questoes_ids_unicos:
+                            todas_questoes.append(questao)
+                            questoes_ids_unicos.add(questao['questao_id'])
+            
             if todas_questoes:
                 reorganized_questions[tree_node['id']] = todas_questoes
-                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas")
+                print(f"[LOG] Tópico nível 4 '{tree_node['nome']}': {len(todas_questoes)} questões reagrupadas (duplicatas removidas)")
         elif tree_node['nivel'] < 4:
             if tree_node['id'] in questions_by_topic:
                 reorganized_questions[tree_node['id']] = questions_by_topic[tree_node['id']]
