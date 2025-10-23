@@ -615,7 +615,22 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
             paragraph_text = []
             for child in elem.children:
                 if hasattr(child, 'name'):
-                    if child.name in ["strong", "b"]:
+                    if child.name == "img":
+                        # Processar imagem diretamente
+                        src = child.get("src", "")
+                        ext = os.path.splitext(src)[1].split("?")[0]
+                        if not ext:
+                            ext = ".jpeg"
+                        if img_count[0] == 1:
+                            img_filename = f"{codigo_questao}{ext}"
+                        else:
+                            img_filename = f"{codigo_questao}_{img_count[0]}{ext}"
+                        img_path = os.path.join(imagens_dir, img_filename)
+                        max_width = get_max_image_width(document)
+                        if not verificar_e_adicionar_imagem(document, img_path, max_width):
+                            document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
+                        img_count[0] += 1
+                    elif child.name in ["strong", "b"]:
                         # Texto em negrito
                         bold_text = child.get_text().strip()
                         if bold_text:
