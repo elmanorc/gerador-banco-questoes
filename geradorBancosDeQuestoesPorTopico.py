@@ -401,9 +401,98 @@ def add_footer_with_text_and_page_number(document):
 def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir):
     # Reduz múltiplas linhas em branco para apenas uma (\n\n), mantendo parágrafos separados
     comentario_md = re.sub(r'\n{3,}', '\n\n', comentario_md)
-    html = markdown(comentario_md)
+    html = markdown(comentario_md, extras=['tables'])
     soup = BeautifulSoup(html, "html.parser")
     img_count = [1]
+
+    def add_horizontal_rule():
+        """Adiciona uma linha divisória horizontal no documento"""
+        # Criar parágrafo para a linha divisória
+        p = document.add_paragraph()
+        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        
+        # Adicionar linha de caracteres para simular linha divisória
+        run = p.add_run("─" * 50)  # 50 caracteres de linha
+        run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)  # Cinza
+        run.font.size = Pt(10)
+        
+        # Adicionar espaçamento antes e depois
+        p.paragraph_format.space_before = Pt(6)
+        p.paragraph_format.space_after = Pt(6)
+
+    def add_table_from_html(table_element):
+        """Converte uma tabela HTML para uma tabela DOCX"""
+        # Encontrar todas as linhas (tr)
+        rows = table_element.find_all('tr')
+        if not rows:
+            return
+        
+        # Determinar número de colunas
+        max_cols = 0
+        for row in rows:
+            cells = row.find_all(['th', 'td'])
+            max_cols = max(max_cols, len(cells))
+        
+        if max_cols == 0:
+            return
+        
+        # Criar tabela no DOCX
+        table = document.add_table(rows=len(rows), cols=max_cols)
+        table.style = 'Table Grid'  # Estilo com bordas
+        
+        # Preencher tabela
+        for row_idx, row in enumerate(rows):
+            cells = row.find_all(['th', 'td'])
+            docx_row = table.rows[row_idx]
+            
+            for col_idx, cell in enumerate(cells):
+                if col_idx < max_cols:
+                    # Obter texto da célula
+                    cell_text = cell.get_text().strip()
+                    cell_text = clean_xml_illegal_chars(cell_text)
+                    
+                    # Adicionar texto à célula do DOCX
+                    docx_cell = docx_row.cells[col_idx]
+                    docx_paragraph = docx_cell.paragraphs[0]
+                    
+                    # Verificar se é cabeçalho (th) e aplicar formatação
+                    if cell.name == 'th':
+                        # Cabeçalho: negrito e fundo cinza claro
+                        run = docx_paragraph.add_run(cell_text)
+                        run.bold = True
+                        # Tentar aplicar fundo cinza (pode não funcionar em todas as versões)
+                        try:
+                            docx_cell._tc.get_or_add_tcPr().append(
+                                OxmlElement('w:shd')
+                            ).set(qn('w:fill'), 'D9D9D9')
+                        except:
+                            pass  # Se não conseguir aplicar cor de fundo, continua
+                    else:
+                        # Célula normal
+                        docx_paragraph.add_run(cell_text)
+                    
+                    # Centralizar texto nas células
+                    docx_paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        
+        # Adicionar espaçamento após a tabela
+        document.add_paragraph("")
+
+    def add_heading_from_html(heading_element):
+        """Converte um título HTML para um título DOCX"""
+        # Determinar nível do título (h1 = 1, h2 = 2, etc.)
+        level = int(heading_element.name[1])  # Remove 'h' e converte para int
+        
+        # Obter texto do título
+        heading_text = heading_element.get_text().strip()
+        heading_text = clean_xml_illegal_chars(heading_text)
+        
+        if not heading_text:
+            return
+        
+        # Adicionar título ao documento
+        # Limitar nível máximo a 9 (limite do DOCX)
+        docx_level = min(level, 9)
+        document.add_heading(heading_text, level=docx_level)
 
     def add_formatted_paragraph(text, level=0, is_bullet=False, bullet_char="•"):
         """Adiciona um parágrafo formatado com indentação e formatação"""
@@ -440,8 +529,8 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
                 run = paragraph.add_run(bold_text)
                 run.bold = True
             else:
-                # Texto normal
-                if part.strip():
+                # Texto normal - manter espaços e quebras de linha
+                if part:  # Não usar .strip() para preservar espaços
                     paragraph.add_run(part)
 
     def process_list_item(li_element, level=0):
@@ -511,20 +600,55 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
         elif elem.name in ["br"]:
             # Quebra de linha
             document.add_paragraph("")
+        elif elem.name == "hr":
+            # Linha divisória horizontal (---)
+            add_horizontal_rule()
+        elif elem.name == "table":
+            # Tabela HTML - converter para tabela DOCX
+            add_table_from_html(elem)
+        elif elem.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+            # Título HTML - converter para título DOCX
+            add_heading_from_html(elem)
         elif elem.name in ["div", "p"]:
-            # Processar conteúdo do parágrafo/div
+            # CORREÇÃO: Coletar todo o texto do parágrafo antes de processar
+            # para evitar quebras de linha desnecessárias
+            paragraph_text = []
             for child in elem.children:
-                process_element(child)
+                if hasattr(child, 'name'):
+                    if child.name in ["strong", "b"]:
+                        # Texto em negrito
+                        bold_text = child.get_text().strip()
+                        if bold_text:
+                            paragraph_text.append(f"**{bold_text}**")
+                    elif child.name in ["em", "i"]:
+                        # Texto em itálico
+                        italic_text = child.get_text().strip()
+                        if italic_text:
+                            paragraph_text.append(f"*{italic_text}*")
+                    elif child.name not in ["ul", "ol"]:
+                        # Outros elementos (exceto listas)
+                        text = child.get_text().strip()
+                        if text:
+                            paragraph_text.append(text)
+                elif isinstance(child, str):
+                    text = child.replace('\xa0', ' ').strip()
+                    if text:
+                        paragraph_text.append(text)
+            
+            # Adicionar como um único parágrafo se houver conteúdo
+            if paragraph_text:
+                full_text = ' '.join(paragraph_text)
+                add_formatted_paragraph(full_text)
         elif elem.name in ["ul", "ol"]:
             # Processar lista
             process_list(elem, 0)
         elif elem.name == "strong" or elem.name == "b":
-            # Texto em negrito
+            # Texto em negrito (fallback para elementos isolados)
             bold_text = elem.get_text().strip()
             if bold_text:
                 add_formatted_paragraph(f"**{bold_text}**")
         elif elem.name == "em" or elem.name == "i":
-            # Texto em itálico
+            # Texto em itálico (fallback para elementos isolados)
             italic_text = elem.get_text().strip()
             if italic_text:
                 add_formatted_paragraph(f"*{italic_text}*")
