@@ -18,6 +18,8 @@ from docx.image.exceptions import UnrecognizedImageError
 import mimetypes
 from datetime import datetime
 from PIL import Image
+import requests
+import json
 
 # Configurações do banco
 DB_CONFIG = {
@@ -25,6 +27,14 @@ DB_CONFIG = {
     "user": "root",
     "password": "El@mysql.32",
     "database": "qconcursos"
+}
+
+# Configurações da API DeepSeek
+DEEPSEEK_CONFIG = {
+    "api_key": "sk-50280cb2abb4473c9463f7ae053f7610",
+    "model": "deepseek-chat",
+    "temperature": 0.1,
+    "url": "https://api.deepseek.com/v1/chat/completions"
 }
 
 def verificar_e_adicionar_imagem(document, img_path, max_width=None):
@@ -98,6 +108,243 @@ def verificar_e_adicionar_imagem(document, img_path, max_width=None):
 def get_connection():
     print("[LOG] Abrindo conexão com o banco de dados...")
     return mysql.connector.connect(**DB_CONFIG)
+
+def identificar_questoes_incompletas(conn, resto_mod5=0):
+    """
+    Identifica questões com comentários incompletos que terminam com 'analisar as alternativas'.
+    Retorna lista de questões do conjunto [INCOMPLETO].
+    """
+    print("[LOG] Identificando questões com comentários incompletos...")
+    
+    cursor = conn.cursor(dictionary=True)
+    
+    # Buscar questões que terminam com 'analisar as alternativas' (com poucos caracteres após)
+    query = """
+    SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC,
+           alternativaD, alternativaE, gabarito, comentario
+    FROM questaoresidencia
+    WHERE comentario LIKE '%analisar as alternativas%'
+      AND (
+        LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as alternativas', comentario) + 23))) < 50
+        OR comentario REGEXP 'analisar as alternativas[[:space:]]*$'
+        OR comentario REGEXP 'analisar as alternativas[[:space:]]*[[:punct:]]*[[:space:]]*$'
+      )
+      AND gabaritoIA IS NULL
+      AND comentarioIA IS NULL
+      AND (MOD(questao_id, 5) = %s)
+    ORDER BY questao_id
+    """
+
+    cursor.execute(query, (resto_mod5,))
+    questoes_incompletas = cursor.fetchall()
+    
+    print(f"[LOG] Encontradas {len(questoes_incompletas)} questões com comentários incompletos")
+    
+    return questoes_incompletas
+
+def chamar_api_deepseek(enunciado, alternativas, gabarito_correto):
+    """
+    Chama a API DeepSeek para analisar uma questão e obter resposta e justificativa.
+    """
+    print(f"[LOG] Chamando API DeepSeek para questão...")
+    
+    # Montar o texto da questão
+    texto_questao = f"Enunciado: {enunciado}\n\n"
+    for alt in ['A', 'B', 'C', 'D', 'E']:
+        if alternativas.get(f'alternativa{alt}'):
+            texto_questao += f"{alt}) {alternativas[f'alternativa{alt}']}\n"
+    
+    # Primeira chamada: solicitar apenas a resposta
+    prompt_resposta = f"""
+Analise a seguinte questão de medicina e responda APENAS com a letra da alternativa correta (A, B, C, D ou E).
+
+{texto_questao}
+
+Responda apenas com a letra da alternativa correta:
+"""
+    
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_CONFIG['api_key']}",
+        "Content-Type": "application/json"
+    }
+    
+    data_resposta = {
+        "model": DEEPSEEK_CONFIG["model"],
+        "messages": [
+            {"role": "user", "content": prompt_resposta}
+        ],
+        "temperature": DEEPSEEK_CONFIG["temperature"],
+        "max_tokens": 10
+    }
+    
+    try:
+        response = requests.post(DEEPSEEK_CONFIG["url"], headers=headers, json=data_resposta)
+        response.raise_for_status()
+        
+        result = response.json()
+        resposta_ia = result['choices'][0]['message']['content'].strip().upper()
+        
+        # Verificar se a resposta é válida (A, B, C, D ou E)
+        if resposta_ia not in ['A', 'B', 'C', 'D', 'E']:
+            print(f"[AVISO] Resposta inválida da IA: {resposta_ia}")
+            return None, None, None
+        
+        print(f"[LOG] IA respondeu: {resposta_ia}, Gabarito correto: {gabarito_correto}")
+        
+        # Verificar se acertou
+        if resposta_ia == gabarito_correto.upper():
+            print(f"[LOG] IA acertou! Solicitando justificativa...")
+            
+            # Segunda chamada: solicitar justificativa detalhada
+            prompt_justificativa = f"""
+A questão anterior foi respondida corretamente. Agora forneça uma justificativa detalhada e educativa em formato markdown, incluindo:
+
+1. Explicação clara do conceito médico envolvido
+2. Análise de cada alternativa (por que está correta ou incorreta)
+3. Uso de recursos visuais como tabelas, emojis e formatação markdown
+4. Estrutura organizada com títulos e seções
+
+{texto_questao}
+
+Resposta correta: {resposta_ia}
+
+Forneça a justificativa completa em markdown:
+"""
+            
+            data_justificativa = {
+                "model": DEEPSEEK_CONFIG["model"],
+                "messages": [
+                    {"role": "user", "content": prompt_justificativa}
+                ],
+                "temperature": DEEPSEEK_CONFIG["temperature"],
+                "max_tokens": 2000
+            }
+            
+            response_justificativa = requests.post(DEEPSEEK_CONFIG["url"], headers=headers, json=data_justificativa)
+            response_justificativa.raise_for_status()
+            
+            result_justificativa = response_justificativa.json()
+            justificativa = result_justificativa['choices'][0]['message']['content'].strip()
+            
+            return resposta_ia, justificativa, True  # acertou = True
+        else:
+            print(f"[LOG] IA errou. Resposta: {resposta_ia}, Gabarito: {gabarito_correto}")
+            return resposta_ia, None, False  # acertou = False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"[ERRO] Erro na chamada da API DeepSeek: {str(e)}")
+        return None, None, None
+    except Exception as e:
+        print(f"[ERRO] Erro inesperado na API: {str(e)}")
+        return None, None, None
+
+def processar_questoes_incompletas(conn, resto_mod5=0):
+    """
+    Processa todas as questões incompletas usando a API DeepSeek.
+    """
+    print("[LOG] === MODO 4: Processando questões com comentários incompletos ===")
+    
+    # Identificar questões incompletas
+    questoes_incompletas = identificar_questoes_incompletas(conn, resto_mod5)
+    
+    if not questoes_incompletas:
+        print("[LOG] Nenhuma questão incompleta encontrada.")
+        return
+    
+    print(f"[LOG] Processando {len(questoes_incompletas)} questões incompletas...")
+    
+    cursor = conn.cursor()
+    sucessos = 0
+    erros = 0
+    
+    for i, questao in enumerate(questoes_incompletas, 1):
+        print(f"\n[LOG] Processando questão {i}/{len(questoes_incompletas)}: {questao['codigo']}")
+        
+        # Preparar alternativas
+        alternativas = {
+            'alternativaA': questao.get('alternativaA', ''),
+            'alternativaB': questao.get('alternativaB', ''),
+            'alternativaC': questao.get('alternativaC', ''),
+            'alternativaD': questao.get('alternativaD', ''),
+            'alternativaE': questao.get('alternativaE', '')
+        }
+        
+        # Chamar API DeepSeek
+        resposta_ia, justificativa, acertou = chamar_api_deepseek(
+            questao['enunciado'], 
+            alternativas, 
+            questao['gabarito']
+        )
+        
+        if resposta_ia is None:
+            print(f"[ERRO] Falha na análise da questão {questao['codigo']}")
+            erros += 1
+            continue
+        
+        # Preparar dados para atualização
+        data_atual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        autor = "DeepSeek AI"
+        
+        try:
+            if acertou and justificativa:
+                # IA acertou - atualizar com justificativa completa
+                update_query = """
+                UPDATE questaoresidencia 
+                SET comentarioIA = %s, 
+                    comentario_autor = %s, 
+                    comentario_data = %s, 
+                    gabaritoIA = %s
+                WHERE questao_id = %s
+                """
+                cursor.execute(update_query, (
+                    justificativa, 
+                    autor, 
+                    data_atual, 
+                    resposta_ia, 
+                    questao['questao_id']
+                ))
+                print(f"[SUCESSO] Questão {questao['codigo']} atualizada com justificativa completa")
+            else:
+                # IA errou - atualizar apenas com dados básicos
+                update_query = """
+                UPDATE questaoresidencia 
+                SET comentario_autor = %s, 
+                    comentario_data = %s, 
+                    gabaritoIA = %s
+                WHERE questao_id = %s
+                """
+                cursor.execute(update_query, (
+                    autor, 
+                    data_atual, 
+                    resposta_ia, 
+                    questao['questao_id']
+                ))
+                print(f"[INFO] Questão {questao['codigo']} atualizada (IA errou)")
+            
+            # Commit após cada questão atualizada
+            conn.commit()
+            sucessos += 1
+            
+        except Exception as e:
+            print(f"[ERRO] Falha ao atualizar questão {questao['codigo']}: {str(e)}")
+            # Rollback apenas da operação atual
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            erros += 1
+    
+    # Fazer commit das alterações 
+    try:
+        conn.commit()
+        print(f"\n[LOG] === RESUMO DO MODO 4 ===")
+        print(f"[LOG] Questões processadas: {len(questoes_incompletas)}")
+        print(f"[LOG] Sucessos: {sucessos}")
+        print(f"[LOG] Erros: {erros}")
+        print(f"[LOG] Alterações commitadas no banco de dados")
+    except Exception as e:
+        print(f"[ERRO] Falha ao fazer commit: {str(e)}")
+        conn.rollback()
 
 def get_topic_tree_recursive(conn, id_topico, current_level=1, max_level=4):
     print(f"[LOG] Buscando árvore de tópicos recursivamente para id_topico={id_topico} (nível {current_level})")
@@ -478,7 +725,7 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
         document.add_paragraph("")
 
     def add_heading_from_html(heading_element):
-        """Converte um título HTML para um título DOCX"""
+        """Converte um título HTML para um parágrafo formatado (não usa estilo de título para evitar aparecer no sumário)"""
         # Determinar nível do título (h1 = 1, h2 = 2, etc.)
         level = int(heading_element.name[1])  # Remove 'h' e converte para int
         
@@ -489,10 +736,22 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
         if not heading_text:
             return
         
-        # Adicionar título ao documento
-        # Limitar nível máximo a 9 (limite do DOCX)
-        docx_level = min(level, 9)
-        document.add_heading(heading_text, level=docx_level)
+        # Mapear níveis de título para tamanhos de fonte
+        # h1 -> 14pt, h2 -> 13pt, h3 -> 12pt, h4+ -> 11pt
+        font_size_mapping = {
+            1: Pt(14),  # h1
+            2: Pt(13),  # h2
+            3: Pt(12),  # h3
+        }
+        
+        # Usar tamanho 11pt para níveis 4 e superiores
+        font_size = font_size_mapping.get(level, Pt(11))
+        
+        # Adicionar como parágrafo normal com formatação especial
+        p = document.add_paragraph()
+        run = p.add_run(heading_text)
+        run.bold = True
+        run.font.size = font_size
 
     def add_formatted_paragraph(text, level=0, is_bullet=False, bullet_char="•"):
         """Adiciona um parágrafo formatado com indentação e formatação"""
@@ -2185,20 +2444,21 @@ if __name__ == "__main__":
     print("1 - Banco completo com 6 áreas médicas (Modo original)")
     print("2 - Banco de tópico específico (qualquer nível na hierarquia)")
     print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE) - Ano 2016 em diante")
+    print("4 - Processar questões com comentários incompletos (DeepSeek AI)")
     print()
     
     # Escolher modo de operação
     try:
-        modo = int(input("Digite sua opção (1, 2 ou 3): "))
-        if modo not in [1, 2, 3]:
-            print("Erro: Opção inválida! Digite 1, 2 ou 3.")
+        modo = int(input("Digite sua opção (1, 2, 3 ou 4): "))
+        if modo not in [1, 2, 3, 4]:
+            print("Erro: Opção inválida! Digite 1, 2, 3 ou 4.")
             exit(1)
     except ValueError:
-        print("Erro: Digite um número válido (1, 2 ou 3)!")
+        print("Erro: Digite um número válido (1, 2, 3 ou 4)!")
         exit(1)
     
     # Solicitar número total de questões
-    if modo != 3:
+    if modo not in [3, 4]:
         try:
             N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
             if N <= 0:
@@ -2289,6 +2549,27 @@ if __name__ == "__main__":
             print("[ERRO] Falha na geração do banco de questões!")
             conn.close()
             exit(1)
+    
+    elif modo == 4:
+        # MODO 4: Processar questões com comentários incompletos
+        print(f"\n[LOG] MODO 4: Processando questões com comentários incompletos")
+        print(f"[LOG] Usando API DeepSeek para análise e justificativa")
+        print()
+
+        # Solicitar RESTO (0 a 4) para permitir processamento paralelo
+        try:
+            resto = int(input("Informe o RESTO (0-4) para filtrar por questao_id % 5 = RESTO: "))
+            if resto not in [0, 1, 2, 3, 4]:
+                print("Erro: RESTO deve ser um número entre 0 e 4!")
+                conn.close()
+                exit(1)
+        except ValueError:
+            print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
+            conn.close()
+            exit(1)
+
+        print(f"[LOG] Filtrando questões: questao_id % 5 = {resto}")
+        processar_questoes_incompletas(conn, resto)
     
     conn.close()
     print("\n[LOG] Processo concluído!")
