@@ -30,8 +30,27 @@ DB_CONFIG = {
 }
 
 # Configurações da API DeepSeek
+def load_api_key():
+    """
+    Carrega a API key do arquivo api_key.txt.
+    """
+    api_key_path = os.path.join(os.path.dirname(__file__), 'api_key.txt')
+    try:
+        with open(api_key_path, 'r', encoding='utf-8') as f:
+            api_key = f.read().strip()
+            if not api_key:
+                raise ValueError("API key está vazia no arquivo api_key.txt")
+            return api_key
+    except FileNotFoundError:
+        print(f"[ERRO] Arquivo api_key.txt não encontrado em {api_key_path}")
+        print("[ERRO] Crie o arquivo api_key.txt na raiz do projeto com sua API key do DeepSeek")
+        raise
+    except Exception as e:
+        print(f"[ERRO] Erro ao ler api_key.txt: {str(e)}")
+        raise
+
 DEEPSEEK_CONFIG = {
-    "api_key": "sk-50280cb2abb4473c9463f7ae053f7610",
+    "api_key": load_api_key(),
     "model": "deepseek-chat",
     "temperature": 0.1,
     "url": "https://api.deepseek.com/v1/chat/completions"
@@ -346,6 +365,135 @@ def processar_questoes_incompletas(conn, resto_mod5=0):
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
         conn.rollback()
 
+def processar_questoes_por_id(conn, questao_ids):
+    """
+    Processa questões específicas por ID usando a API DeepSeek.
+    Atualiza as colunas gabaritoIA e comentarioIA.
+    """
+    print("[LOG] === MODO 5: Processando questões por ID ===")
+    
+    if not questao_ids:
+        print("[ERRO] Nenhum ID de questão fornecido.")
+        return
+    
+    print(f"[LOG] Buscando {len(questao_ids)} questão(ões) no banco de dados...")
+    
+    cursor = conn.cursor(dictionary=True)
+    
+    # Buscar questões pelos IDs fornecidos
+    format_strings = ','.join(['%s'] * len(questao_ids))
+    query = f"""
+    SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
+           alternativaD, alternativaE, gabarito, comentario
+    FROM questaoresidencia 
+    WHERE questao_id IN ({format_strings})
+    ORDER BY questao_id
+    """
+    
+    cursor.execute(query, tuple(questao_ids))
+    questoes = cursor.fetchall()
+    
+    if not questoes:
+        print(f"[ERRO] Nenhuma questão encontrada com os IDs fornecidos.")
+        return
+    
+    print(f"[LOG] Encontradas {len(questoes)} questão(ões) no banco de dados")
+    
+    # Verificar se há IDs que não foram encontrados
+    ids_encontrados = {q['questao_id'] for q in questoes}
+    ids_nao_encontrados = [id_q for id_q in questao_ids if id_q not in ids_encontrados]
+    if ids_nao_encontrados:
+        print(f"[AVISO] Os seguintes IDs não foram encontrados: {ids_nao_encontrados}")
+    
+    cursor.close()
+    cursor = conn.cursor()
+    sucessos = 0
+    erros = 0
+    
+    for i, questao in enumerate(questoes, 1):
+        print(f"\n[LOG] Processando questão {i}/{len(questoes)}: ID {questao['questao_id']} (Código: {questao['codigo']})")
+        
+        # Preparar alternativas
+        alternativas = {
+            'alternativaA': questao.get('alternativaA', ''),
+            'alternativaB': questao.get('alternativaB', ''),
+            'alternativaC': questao.get('alternativaC', ''),
+            'alternativaD': questao.get('alternativaD', ''),
+            'alternativaE': questao.get('alternativaE', '')
+        }
+        
+        # Chamar API DeepSeek
+        resposta_ia, justificativa, acertou = chamar_api_deepseek(
+            questao['enunciado'], 
+            alternativas, 
+            questao['gabarito']
+        )
+        
+        if resposta_ia is None:
+            print(f"[ERRO] Falha na análise da questão ID {questao['questao_id']}")
+            erros += 1
+            continue
+        
+        # Preparar dados para atualização
+        data_atual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        autor = "DeepSeek AI"
+        
+        try:
+            if acertou and justificativa:
+                # IA acertou - atualizar com justificativa completa
+                update_query = """
+                UPDATE questaoresidencia 
+                SET comentarioIA = %s, 
+                    comentario_autor = %s, 
+                    comentario_data = %s, 
+                    gabaritoIA = %s
+                WHERE questao_id = %s
+                """
+                cursor.execute(update_query, (
+                    justificativa, 
+                    autor, 
+                    data_atual, 
+                    resposta_ia, 
+                    questao['questao_id']
+                ))
+                print(f"[SUCESSO] Questão ID {questao['questao_id']} (Código: {questao['codigo']}) atualizada com justificativa completa")
+            else:
+                # IA errou - atualizar apenas com dados básicos
+                update_query = """
+                UPDATE questaoresidencia 
+                SET comentario_autor = %s, 
+                    comentario_data = %s, 
+                    gabaritoIA = %s
+                WHERE questao_id = %s
+                """
+                cursor.execute(update_query, (
+                    autor, 
+                    data_atual, 
+                    resposta_ia, 
+                    questao['questao_id']
+                ))
+                print(f"[INFO] Questão ID {questao['questao_id']} (Código: {questao['codigo']}) atualizada (IA errou)")
+            
+            # Commit após cada questão atualizada
+            conn.commit()
+            sucessos += 1
+            
+        except Exception as e:
+            print(f"[ERRO] Falha ao atualizar questão ID {questao['questao_id']}: {str(e)}")
+            # Rollback apenas da operação atual
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            erros += 1
+    
+    print(f"\n[LOG] === RESUMO DO MODO 5 ===")
+    print(f"[LOG] Questões processadas: {len(questoes)}")
+    print(f"[LOG] Sucessos: {sucessos}")
+    print(f"[LOG] Erros: {erros}")
+    if ids_nao_encontrados:
+        print(f"[LOG] IDs não encontrados: {len(ids_nao_encontrados)}")
+
 def get_topic_tree_recursive(conn, id_topico, current_level=1, max_level=4):
     print(f"[LOG] Buscando árvore de tópicos recursivamente para id_topico={id_topico} (nível {current_level})")
     cursor = conn.cursor(dictionary=True)
@@ -645,10 +793,89 @@ def add_footer_with_text_and_page_number(document):
         run_total._r.append(fldChar2t)
         run_total._r.append(fldChar3t)
 
+def render_mermaid_to_image(mermaid_code, temp_dir):
+    """
+    Renderiza código Mermaid para PNG usando API externa.
+    Retorna o caminho da imagem gerada ou None se falhar.
+    """
+    import hashlib
+    import base64
+    
+    try:
+        # Criar hash do código Mermaid para usar como nome do arquivo
+        mermaid_hash = hashlib.md5(mermaid_code.encode('utf-8')).hexdigest()[:12]
+        output_path = os.path.join(temp_dir, f"mermaid_{mermaid_hash}.png")
+        
+        # Se a imagem já existe, retornar o caminho
+        if os.path.exists(output_path):
+            print(f"[LOG] Imagem Mermaid já existe: {output_path}")
+            return output_path
+        
+        # Codificar o código Mermaid em base64 para a API
+        mermaid_encoded = base64.urlsafe_b64encode(mermaid_code.encode('utf-8')).decode('ascii')
+        
+        # URL da API do Mermaid (serviço público de renderização)
+        api_url = f"https://mermaid.ink/img/{mermaid_encoded}"
+        
+        print(f"[LOG] Renderizando Mermaid via API: {api_url[:80]}...")
+        
+        # Fazer requisição para a API
+        response = requests.get(api_url, timeout=30)
+        
+        if response.status_code == 200:
+            # Salvar a imagem
+            os.makedirs(temp_dir, exist_ok=True)
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+            print(f"[LOG] Imagem Mermaid gerada: {output_path}")
+            return output_path
+        else:
+            print(f"[AVISO] Falha ao renderizar Mermaid: status {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"[AVISO] Erro ao renderizar Mermaid: {str(e)}")
+        return None
+
 def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir):
     # Reduz múltiplas linhas em branco para apenas uma (\n\n), mantendo parágrafos separados
     comentario_md = re.sub(r'\n{3,}', '\n\n', comentario_md)
+    
+    # Processar blocos Mermaid antes de converter para HTML
+    # Criar diretório temporário para imagens Mermaid
+    temp_mermaid_dir = os.path.join(os.path.dirname(__file__), 'temp_mermaid')
+    os.makedirs(temp_mermaid_dir, exist_ok=True)
+    
+    # Regex para encontrar blocos de código Mermaid
+    mermaid_pattern = r'```mermaid\s*\n(.*?)```'
+    mermaid_blocks = re.finditer(mermaid_pattern, comentario_md, re.DOTALL)
+    
+    # Armazenar imagens Mermaid processadas
+    mermaid_images_map = {}
+    
+    # Processar cada bloco Mermaid encontrado (processar em ordem reversa para manter posições corretas)
+    mermaid_blocks = list(mermaid_blocks)
+    for idx, match in enumerate(reversed(mermaid_blocks)):
+        mermaid_code = match.group(1).strip()
+        print(f"[LOG] Processando bloco Mermaid {len(mermaid_blocks) - idx}")
+        
+        # Renderizar Mermaid para imagem
+        img_path = render_mermaid_to_image(mermaid_code, temp_mermaid_dir)
+        
+        if img_path and os.path.exists(img_path):
+            # Criar uma tag HTML img inline que será processada pelo parser HTML
+            # Usar um placeholder temporário que será substituído
+            placeholder = f'<img src="MERMAID_TEMP_{len(mermaid_blocks) - idx - 1}" />'
+            comentario_md = comentario_md[:match.start()] + placeholder + comentario_md[match.end():]
+            
+            # Armazenar o caminho da imagem
+            mermaid_images_map[len(mermaid_blocks) - idx - 1] = img_path
+    
     html = markdown(comentario_md, extras=['tables'])
+    
+    # Substituir placeholders MERMAID_TEMP_ pelos caminhos reais
+    for idx, img_path in mermaid_images_map.items():
+        html = html.replace(f'src="MERMAID_TEMP_{idx}"', f'src="{img_path}"')
     soup = BeautifulSoup(html, "html.parser")
     img_count = [1]
 
@@ -2445,20 +2672,21 @@ if __name__ == "__main__":
     print("2 - Banco de tópico específico (qualquer nível na hierarquia)")
     print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE) - Ano 2016 em diante")
     print("4 - Processar questões com comentários incompletos (DeepSeek AI)")
+    print("5 - Processar questões específicas por ID (DeepSeek AI)")
     print()
     
     # Escolher modo de operação
     try:
-        modo = int(input("Digite sua opção (1, 2, 3 ou 4): "))
-        if modo not in [1, 2, 3, 4]:
-            print("Erro: Opção inválida! Digite 1, 2, 3 ou 4.")
+        modo = int(input("Digite sua opção (1, 2, 3, 4 ou 5): "))
+        if modo not in [1, 2, 3, 4, 5]:
+            print("Erro: Opção inválida! Digite 1, 2, 3, 4 ou 5.")
             exit(1)
     except ValueError:
-        print("Erro: Digite um número válido (1, 2, 3 ou 4)!")
+        print("Erro: Digite um número válido (1, 2, 3, 4 ou 5)!")
         exit(1)
     
     # Solicitar número total de questões
-    if modo not in [3, 4]:
+    if modo not in [3, 4, 5]:
         try:
             N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
             if N <= 0:
@@ -2570,6 +2798,41 @@ if __name__ == "__main__":
 
         print(f"[LOG] Filtrando questões: questao_id % 5 = {resto}")
         processar_questoes_incompletas(conn, resto)
+    
+    elif modo == 5:
+        # MODO 5: Processar questões específicas por ID
+        print(f"\n[LOG] MODO 5: Processando questões específicas por ID")
+        print(f"[LOG] Usando API DeepSeek para análise e justificativa")
+        print()
+        
+        # Solicitar IDs das questões
+        try:
+            ids_input = input("Informe um ou mais IDs de questões (separados por vírgula): ")
+            ids_str = [id_str.strip() for id_str in ids_input.split(',')]
+            questao_ids = []
+            
+            for id_str in ids_str:
+                try:
+                    questao_id = int(id_str)
+                    if questao_id <= 0:
+                        print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser positivo)")
+                        continue
+                    questao_ids.append(questao_id)
+                except ValueError:
+                    print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser um número)")
+            
+            if not questao_ids:
+                print("[ERRO] Nenhum ID válido fornecido!")
+                conn.close()
+                exit(1)
+            
+            print(f"[LOG] IDs de questões a processar: {questao_ids}")
+            processar_questoes_por_id(conn, questao_ids)
+            
+        except Exception as e:
+            print(f"[ERRO] Erro ao processar IDs: {str(e)}")
+            conn.close()
+            exit(1)
     
     conn.close()
     print("\n[LOG] Processo concluído!")

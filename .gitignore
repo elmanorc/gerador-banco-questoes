@@ -9,3 +9,9 @@
 
 # Outros arquivos que podem ser gerados pelo script
 banco_questoes_*.docx
+
+# API Key do DeepSeek (não versionar)
+api_key.txt
+
+# Imagens Mermaid temporárias (não versionar)
+temp_mermaid/
