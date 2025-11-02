@@ -130,24 +130,36 @@ def get_connection():
 
 def identificar_questoes_incompletas(conn, resto_mod5=0):
     """
-    Identifica questões com comentários incompletos que terminam com 'analisar as alternativas'.
+    Identifica questões com comentários incompletos que terminam com 'analisar as alternativas' ou 'analisar as opções'.
     Retorna lista de questões do conjunto [INCOMPLETO].
     """
     print("[LOG] Identificando questões com comentários incompletos...")
     
     cursor = conn.cursor(dictionary=True)
     
-    # Buscar questões que terminam com 'analisar as alternativas' (com poucos caracteres após)
+    # Buscar questões que terminam com 'analisar as alternativas' ou 'analisar as opções' (com poucos caracteres após)
     query = """
     SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC,
            alternativaD, alternativaE, gabarito, comentario
     FROM questaoresidencia
-    WHERE comentario LIKE '%analisar as alternativas%'
-      AND (
-        LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as alternativas', comentario) + 23))) < 50
-        OR comentario REGEXP 'analisar as alternativas[[:space:]]*$'
-        OR comentario REGEXP 'analisar as alternativas[[:space:]]*[[:punct:]]*[[:space:]]*$'
+    WHERE (
+      (
+        comentario LIKE '%analisar as alternativas%'
+        AND (
+          LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as alternativas', comentario) + 23))) < 50
+          OR comentario REGEXP 'analisar as alternativas[[:space:]]*$'
+          OR comentario REGEXP 'analisar as alternativas[[:space:]]*[[:punct:]]*[[:space:]]*$'
+        )
       )
+      OR (
+        comentario LIKE '%analisar as opções%'
+        AND (
+          LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as opções', comentario) + 19))) < 50
+          OR comentario REGEXP 'analisar as opções[[:space:]]*$'
+          OR comentario REGEXP 'analisar as opções[[:space:]]*[[:punct:]]*[[:space:]]*$'
+        )
+      )
+    )
       AND gabaritoIA IS NULL
       AND comentarioIA IS NULL
       AND (MOD(questao_id, 5) = %s)
