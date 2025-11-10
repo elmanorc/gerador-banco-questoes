@@ -128,45 +128,30 @@ def get_connection():
     print("[LOG] Abrindo conexão com o banco de dados...")
     return mysql.connector.connect(**DB_CONFIG)
 
-def identificar_questoes_incompletas(conn, resto_mod5=0):
+def identificar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     """
-    Identifica questões com comentários incompletos que terminam com 'analisar as alternativas' ou 'analisar as opções'.
+    Identifica questões com comentários incompletos que terminam com 'analisar as alternativas' ou 'analisar as opções',
+    que ainda não possuem resposta gerada pela IA (gabaritoIA IS NULL) e pertencem à instituição informada.
     Retorna lista de questões do conjunto [INCOMPLETO].
     """
     print("[LOG] Identificando questões com comentários incompletos...")
     
     cursor = conn.cursor(dictionary=True)
     
-    # Buscar questões que terminam com 'analisar as alternativas' ou 'analisar as opções' (com poucos caracteres após)
+    # Buscar questões que não foram respondidas pela IA e sejam de determinada instituição
     query = """
     SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC,
            alternativaD, alternativaE, gabarito, comentario
     FROM questaoresidencia
-    WHERE (
-      (
-        comentario LIKE '%analisar as alternativas%'
-        AND (
-          LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as alternativas', comentario) + 23))) < 50
-          OR comentario REGEXP 'analisar as alternativas[[:space:]]*$'
-          OR comentario REGEXP 'analisar as alternativas[[:space:]]*[[:punct:]]*[[:space:]]*$'
-        )
-      )
-      OR (
-        comentario LIKE '%analisar as opções%'
-        AND (
-          LENGTH(TRIM(SUBSTRING(comentario, LOCATE('analisar as opções', comentario) + 19))) < 50
-          OR comentario REGEXP 'analisar as opções[[:space:]]*$'
-          OR comentario REGEXP 'analisar as opções[[:space:]]*[[:punct:]]*[[:space:]]*$'
-        )
-      )
-    )
-      AND gabaritoIA IS NULL
+    WHERE gabaritoIA IS NULL
       AND comentarioIA IS NULL
+      AND instituicao LIKE %s
       AND (MOD(questao_id, 5) = %s)
     ORDER BY questao_id
     """
 
-    cursor.execute(query, (resto_mod5,))
+    instituicao_like = f"%{instituicao}%"
+    cursor.execute(query, (instituicao_like, resto_mod5))
     questoes_incompletas = cursor.fetchall()
     
     print(f"[LOG] Encontradas {len(questoes_incompletas)} questões com comentários incompletos")
@@ -269,14 +254,14 @@ Forneça a justificativa completa em markdown:
         print(f"[ERRO] Erro inesperado na API: {str(e)}")
         return None, None, None
 
-def processar_questoes_incompletas(conn, resto_mod5=0):
+def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     """
-    Processa todas as questões incompletas usando a API DeepSeek.
+    Processa todas as questões incompletas de uma instituição específica usando a API DeepSeek.
     """
     print("[LOG] === MODO 4: Processando questões com comentários incompletos ===")
     
     # Identificar questões incompletas
-    questoes_incompletas = identificar_questoes_incompletas(conn, resto_mod5)
+    questoes_incompletas = identificar_questoes_incompletas(conn, instituicao, resto_mod5)
     
     if not questoes_incompletas:
         print("[LOG] Nenhuma questão incompleta encontrada.")
@@ -737,7 +722,9 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         run = p.add_run(f"Gabarito: {q['gabarito']} - {gabarito_texto_limpo}")
         run.bold = True
 
-        if q.get('comentario'):
+        if q.get('gabaritoIA') == q.get('gabarito'):
+            add_comentario_with_images(document, q['comentarioIA'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
+        else:
             add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
         document.add_paragraph("")  # Espaço
         questao_num += 1
@@ -2232,7 +2219,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
 
 def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
     """
-    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL ou ENARE) e ano >= 2016.
+    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada) e ano >= 2016.
     Recupera todas as questões que atendam aos critérios, sem cotas por área.
     
     Args:
@@ -2682,7 +2669,7 @@ if __name__ == "__main__":
     print("Escolha o modo de geração:")
     print("1 - Banco completo com 6 áreas médicas (Modo original)")
     print("2 - Banco de tópico específico (qualquer nível na hierarquia)")
-    print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE) - Ano 2016 em diante")
+    print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE/Outra) - Ano 2016 em diante")
     print("4 - Processar questões com comentários incompletos (DeepSeek AI)")
     print("5 - Processar questões específicas por ID (DeepSeek AI)")
     print()
@@ -2772,11 +2759,28 @@ if __name__ == "__main__":
         print("Instituições disponíveis:")
         print("1:  REVALIDA NACIONAL - Revalidação de diplomas médicos obtidos no exterior")
         print("2:  ENARE - Exame Nacional de Revalidação de Diplomas Médicos Expedidos por Instituições de Educação Superior Estrangeiras")
+        print("3:  Outro - Informar o nome da instituição desejada")
         print()
         
-        opcao_instituicao = int(input("Digite o número da instituição (REVALIDA NACIONAL ou ENARE): "))
+        while True:
+            try:
+                opcao_instituicao = int(input("Digite o número da instituição (1, 2 ou 3): "))
+                if opcao_instituicao in [1, 2, 3]:
+                    break
+                print("Erro: Opção inválida! Digite 1, 2 ou 3.")
+            except ValueError:
+                print("Erro: Digite um número válido (1, 2 ou 3)!")
         
-        instituicao_input = 'REVALIDA NACIONAL' if opcao_instituicao == 1 else 'ENARE'
+        if opcao_instituicao == 1:
+            instituicao_input = 'REVALIDA NACIONAL'
+        elif opcao_instituicao == 2:
+            instituicao_input = 'ENARE'
+        else:
+            instituicao_input = ""
+            while not instituicao_input:
+                instituicao_input = input("Digite o nome da instituição desejada: ").strip()
+                if not instituicao_input:
+                    print("Erro: O nome da instituição não pode ser vazio!")
         
         print(f"[LOG] Instituição selecionada: {instituicao_input}")
         print(f"[LOG] Filtros aplicados: ano >= 2016, comentário >= 400 caracteres")
@@ -2796,6 +2800,12 @@ if __name__ == "__main__":
         print(f"[LOG] Usando API DeepSeek para análise e justificativa")
         print()
 
+        instituicao_input = ""
+        while not instituicao_input:
+            instituicao_input = input("Informe o nome (ou parte) da instituição das questões a processar: ").strip()
+            if not instituicao_input:
+                print("Erro: O nome da instituição não pode ser vazio!")
+
         # Solicitar RESTO (0 a 4) para permitir processamento paralelo
         try:
             resto = int(input("Informe o RESTO (0-4) para filtrar por questao_id % 5 = RESTO: "))
@@ -2808,8 +2818,9 @@ if __name__ == "__main__":
             conn.close()
             exit(1)
 
+        print(f"[LOG] Instituição: {instituicao_input}")
         print(f"[LOG] Filtrando questões: questao_id % 5 = {resto}")
-        processar_questoes_incompletas(conn, resto)
+        processar_questoes_incompletas(conn, instituicao_input, resto)
     
     elif modo == 5:
         # MODO 5: Processar questões específicas por ID
