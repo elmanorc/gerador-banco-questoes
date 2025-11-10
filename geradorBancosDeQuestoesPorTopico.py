@@ -272,6 +272,9 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     cursor = conn.cursor()
     sucessos = 0
     erros = 0
+    acertos_ia = 0
+    erros_ia = 0
+    questoes_avaliadas = 0
     
     for i, questao in enumerate(questoes_incompletas, 1):
         print(f"\n[LOG] Processando questão {i}/{len(questoes_incompletas)}: {questao['codigo']}")
@@ -296,6 +299,12 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
             print(f"[ERRO] Falha na análise da questão {questao['codigo']}")
             erros += 1
             continue
+        
+        questoes_avaliadas += 1
+        if acertou:
+            acertos_ia += 1
+        else:
+            erros_ia += 1
         
         # Preparar dados para atualização
         data_atual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -357,6 +366,13 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         print(f"[LOG] Questões processadas: {len(questoes_incompletas)}")
         print(f"[LOG] Sucessos: {sucessos}")
         print(f"[LOG] Erros: {erros}")
+        print(f"[LOG] Questões avaliadas pela IA: {questoes_avaliadas}")
+        if questoes_avaliadas > 0:
+            taxa_acerto = (acertos_ia / questoes_avaliadas) * 100
+            print(f"[LOG] Taxa de acerto da IA: {taxa_acerto:.2f}% ({acertos_ia}/{questoes_avaliadas})")
+        else:
+            print(f"[LOG] Taxa de acerto da IA: N/A (nenhuma questão avaliada)")
+        print(f"[LOG] Total de erros da IA: {erros_ia}")
         print(f"[LOG] Alterações commitadas no banco de dados")
     except Exception as e:
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
@@ -723,7 +739,13 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         run.bold = True
 
         if q.get('gabaritoIA') == q.get('gabarito'):
-            add_comentario_with_images(document, q['comentarioIA'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
+            add_comentario_with_images(
+                document,
+                q['comentarioIA'],
+                q['codigo'],
+                r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                usar_src_absoluto=True
+            )
         else:
             add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
         document.add_paragraph("")  # Espaço
@@ -836,7 +858,7 @@ def render_mermaid_to_image(mermaid_code, temp_dir):
         print(f"[AVISO] Erro ao renderizar Mermaid: {str(e)}")
         return None
 
-def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir):
+def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir, usar_src_absoluto=False):
     # Reduz múltiplas linhas em branco para apenas uma (\n\n), mantendo parágrafos separados
     comentario_md = re.sub(r'\n{3,}', '\n\n', comentario_md)
     
@@ -1061,6 +1083,31 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
         for li in list_element.find_all('li', recursive=False):
             process_list_item(li, level)
 
+    def obter_caminho_imagem(src, indice_imagem):
+        """
+        Retorna o caminho da imagem a ser inserida.
+        Se usar_src_absoluto=True e o src apontar para um arquivo existente, usa-o diretamente.
+        Caso contrário, monta o caminho usando imagens_dir e o padrão legado.
+        """
+        if usar_src_absoluto and src:
+            # Normalizar barras para evitar problemas no Windows
+            src_normalizado = os.path.normpath(src)
+            if os.path.isabs(src_normalizado) and os.path.exists(src_normalizado):
+                return src_normalizado
+            # Tentar relativo ao diretório atual do script
+            relativo_script = os.path.join(os.path.dirname(__file__), src_normalizado)
+            if os.path.exists(relativo_script):
+                return relativo_script
+        # Fallback para comportamento original
+        ext = os.path.splitext(src)[1].split("?")[0]
+        if not ext:
+            ext = ".jpeg"
+        if indice_imagem == 1:
+            img_filename = f"{codigo_questao}{ext}"
+        else:
+            img_filename = f"{codigo_questao}_{indice_imagem}{ext}"
+        return os.path.join(imagens_dir, img_filename)
+
     def process_element(elem):
         if isinstance(elem, Comment):
             return
@@ -1070,17 +1117,10 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
                 add_formatted_paragraph(text)
         elif elem.name == "img":
             src = elem.get("src", "")
-            ext = os.path.splitext(src)[1].split("?")[0]
-            if not ext:
-                ext = ".jpeg"
-            if img_count[0] == 1:
-                img_filename = f"{codigo_questao}{ext}"
-            else:
-                img_filename = f"{codigo_questao}_{img_count[0]}{ext}"
-            img_path = os.path.join(imagens_dir, img_filename)
+            img_path = obter_caminho_imagem(src, img_count[0])
             max_width = get_max_image_width(document)
             if not verificar_e_adicionar_imagem(document, img_path, max_width):
-                document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
+                document.add_paragraph(f"[Imagem não encontrada ou inválida: {os.path.basename(img_path)}]")
             img_count[0] += 1
         elif elem.name in ["br"]:
             # Quebra de linha
@@ -1103,17 +1143,10 @@ def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_
                     if child.name == "img":
                         # Processar imagem diretamente
                         src = child.get("src", "")
-                        ext = os.path.splitext(src)[1].split("?")[0]
-                        if not ext:
-                            ext = ".jpeg"
-                        if img_count[0] == 1:
-                            img_filename = f"{codigo_questao}{ext}"
-                        else:
-                            img_filename = f"{codigo_questao}_{img_count[0]}{ext}"
-                        img_path = os.path.join(imagens_dir, img_filename)
+                        img_path = obter_caminho_imagem(src, img_count[0])
                         max_width = get_max_image_width(document)
                         if not verificar_e_adicionar_imagem(document, img_path, max_width):
-                            document.add_paragraph(f"[Imagem não encontrada ou inválida: {img_filename}]")
+                            document.add_paragraph(f"[Imagem não encontrada ou inválida: {os.path.basename(img_path)}]")
                         img_count[0] += 1
                     elif child.name in ["strong", "b"]:
                         # Texto em negrito
@@ -2238,7 +2271,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
     SELECT 
         q.*
     FROM questaoresidencia q
-    WHERE CHAR_LENGTH(q.comentario) >= 400
+    WHERE (CHAR_LENGTH(comentario)>400 or (CHAR_LENGTH(comentarioIA)>400 and gabaritoIA=gabarito))
       AND q.ano >= 2016
       AND q.instituicao LIKE '%{instituicao}%'
     ORDER BY q.ano DESC, q.questao_id
