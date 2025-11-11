@@ -56,6 +56,45 @@ DEEPSEEK_CONFIG = {
     "url": "https://api.deepseek.com/v1/chat/completions"
 }
 
+def deepseek_chat(messages, max_tokens=200, temperature=None):
+    """
+    Executa uma chamada à API DeepSeek com os parâmetros padrão do projeto.
+    Retorna o conteúdo textual da resposta da IA ou None em caso de erro.
+    """
+    if temperature is None:
+        temperature = DEEPSEEK_CONFIG["temperature"]
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_CONFIG['api_key']}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": DEEPSEEK_CONFIG["model"],
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+
+    try:
+        response = requests.post(DEEPSEEK_CONFIG["url"], headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        content = data['choices'][0]['message']['content']
+        if content is None:
+            print("[ERRO] Resposta da API DeepSeek sem conteúdo.")
+            return None
+        return content
+    except requests.exceptions.RequestException as e:
+        print(f"[ERRO] Erro na chamada da API DeepSeek: {str(e)}")
+        return None
+    except (KeyError, IndexError) as e:
+        print(f"[ERRO] Estrutura inesperada na resposta da API DeepSeek: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"[ERRO] Falha inesperada ao processar resposta da API DeepSeek: {str(e)}")
+        return None
+
 def verificar_e_adicionar_imagem(document, img_path, max_width=None):
     """
     Função auxiliar para verificar e adicionar imagem de forma segura.
@@ -179,26 +218,16 @@ Analise a seguinte questão de medicina e responda APENAS com a letra da alterna
 Responda apenas com a letra da alternativa correta:
 """
     
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_CONFIG['api_key']}",
-        "Content-Type": "application/json"
-    }
-    
-    data_resposta = {
-        "model": DEEPSEEK_CONFIG["model"],
-        "messages": [
-            {"role": "user", "content": prompt_resposta}
-        ],
-        "temperature": DEEPSEEK_CONFIG["temperature"],
-        "max_tokens": 10
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_CONFIG["url"], headers=headers, json=data_resposta)
-        response.raise_for_status()
-        
-        result = response.json()
-        resposta_ia = result['choices'][0]['message']['content'].strip().upper()
+        resposta_bruta = deepseek_chat(
+            [{"role": "user", "content": prompt_resposta}],
+            max_tokens=10
+        )
+        if not resposta_bruta:
+            print("[AVISO] Nenhuma resposta recebida da IA para a alternativa correta.")
+            return None, None, None
+
+        resposta_ia = resposta_bruta.strip().upper()
         
         # Verificar se a resposta é válida (A, B, C, D ou E)
         if resposta_ia not in ['A', 'B', 'C', 'D', 'E']:
@@ -227,32 +256,314 @@ Resposta correta: {resposta_ia}
 Forneça a justificativa completa em markdown:
 """
             
-            data_justificativa = {
-                "model": DEEPSEEK_CONFIG["model"],
-                "messages": [
-                    {"role": "user", "content": prompt_justificativa}
-                ],
-                "temperature": DEEPSEEK_CONFIG["temperature"],
-                "max_tokens": 2000
-            }
-            
-            response_justificativa = requests.post(DEEPSEEK_CONFIG["url"], headers=headers, json=data_justificativa)
-            response_justificativa.raise_for_status()
-            
-            result_justificativa = response_justificativa.json()
-            justificativa = result_justificativa['choices'][0]['message']['content'].strip()
+            justificativa = deepseek_chat(
+                [{"role": "user", "content": prompt_justificativa}],
+                max_tokens=2000
+            )
+            if justificativa:
+                justificativa = justificativa.strip()
+            else:
+                print("[AVISO] Não foi possível obter justificativa da IA.")
             
             return resposta_ia, justificativa, True  # acertou = True
         else:
             print(f"[LOG] IA errou. Resposta: {resposta_ia}, Gabarito: {gabarito_correto}")
             return resposta_ia, None, False  # acertou = False
             
-    except requests.exceptions.RequestException as e:
-        print(f"[ERRO] Erro na chamada da API DeepSeek: {str(e)}")
-        return None, None, None
     except Exception as e:
         print(f"[ERRO] Erro inesperado na API: {str(e)}")
         return None, None, None
+
+def extrair_primeiro_inteiro(texto):
+    """
+    Extrai o primeiro número inteiro encontrado na string fornecida.
+    """
+    if not texto:
+        return None
+    match = re.search(r'\d+', texto)
+    if not match:
+        return None
+    try:
+        return int(match.group())
+    except ValueError:
+        return None
+
+def carregar_hierarquia_topicos(conn):
+    """
+    Carrega toda a hierarquia de tópicos e organiza filhos para navegação.
+    Retorna um dicionário {id_topico: {...}} e uma lista ordenada de tópicos raiz.
+    """
+    print("[LOG] Carregando hierarquia completa de tópicos...")
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT id, nome, id_pai FROM topico")
+    topicos = cursor.fetchall()
+    cursor.close()
+
+    if not topicos:
+        print("[ERRO] Nenhum tópico encontrado na base de dados.")
+        return {}, []
+
+    topicos_dict = {}
+    for t in topicos:
+        topicos_dict[t['id']] = {
+            'id': t['id'],
+            'nome': t['nome'],
+            'id_pai': t['id_pai'],
+            'filhos': []
+        }
+
+    for t in topicos:
+        id_pai = t['id_pai']
+        if id_pai and id_pai in topicos_dict:
+            topicos_dict[id_pai]['filhos'].append(t['id'])
+
+    for info in topicos_dict.values():
+        info['filhos'] = sorted(
+            [fid for fid in info['filhos'] if fid in topicos_dict],
+            key=lambda tid: topicos_dict[tid]['nome']
+        )
+
+    topicos_raiz = sorted(
+        [t_id for t_id, t_info in topicos_dict.items() if t_info['id_pai'] is None],
+        key=lambda tid: topicos_dict[tid]['nome']
+    )
+
+    print(f"[LOG] Hierarquia carregada: {len(topicos_dict)} tópicos, {len(topicos_raiz)} raízes.")
+    return topicos_dict, topicos_raiz
+
+def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
+    """
+    Recupera questões que ainda não possuem registros em classificacao_questao.
+    Permite filtrar por instituição e por resto de divisão por 5.
+    """
+    print("[LOG] Buscando questões sem classificação...")
+    cursor = conn.cursor(dictionary=True)
+    query = """
+    SELECT q.questao_id, q.codigo, q.enunciado, q.gabarito, COALESCE(q.gabarito_texto, '') AS gabarito_texto,
+           COALESCE(q.instituicao, '') AS instituicao
+    FROM questaoresidencia q
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM classificacao_questao cq
+        WHERE cq.id_questao = q.questao_id
+    )
+    """
+    params = []
+
+    if filtro_instituicao:
+        query += " AND q.instituicao LIKE %s"
+        params.append(f"%{filtro_instituicao}%")
+
+    if resto_mod5 is not None:
+        query += " AND MOD(q.questao_id, 5) = %s"
+        params.append(resto_mod5)
+
+    if filtro_ano is not None:
+        query += " AND q.ano >= %s"
+        params.append(filtro_ano)
+
+    query += " ORDER BY q.questao_id"
+
+    if limite and limite > 0:
+        query += " LIMIT %s"
+        params.append(limite)
+
+    cursor.execute(query, tuple(params))
+    questoes = cursor.fetchall()
+    cursor.close()
+
+    print(f"[LOG] Questões encontradas sem classificação: {len(questoes)}")
+    return questoes
+
+def montar_lista_opcoes(topicos_dict, topico_ids):
+    """
+    Monta a lista textual das opções e o mapeamento índice->id_topico.
+    """
+    opcoes_texto = []
+    mapa_indice = {}
+    for idx, topico_id in enumerate(topico_ids, start=1):
+        nome = topicos_dict[topico_id]['nome']
+        opcoes_texto.append(f"{idx}. {nome}")
+        mapa_indice[idx] = topico_id
+    return "\n".join(opcoes_texto), mapa_indice
+
+def classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz_ids):
+    """
+    Realiza a classificação hierárquica de uma questão utilizando a API DeepSeek.
+    Retorna (lista_de_topicos, classificacao_completa) onde classificacao_completa indica
+    se foi possível chegar até um tópico folha.
+    """
+    enunciado_limpo = extrair_texto_sem_imagens(questao.get('enunciado', '') or '')
+    gabarito_texto = questao.get('gabarito_texto') or ''
+    gabarito_texto_limpo = extrair_texto_sem_imagens(gabarito_texto) if gabarito_texto else ''
+
+    enunciado_limpo = enunciado_limpo[:4000]
+    gabarito_composto = (questao.get('gabarito') or '').strip()
+    if gabarito_texto_limpo:
+        gabarito_composto = f"{gabarito_composto} - {gabarito_texto_limpo}"
+    gabarito_composto = gabarito_composto[:1000]
+
+    caminho_topicos = []
+    opcoes_atual = list(topicos_raiz_ids)
+    nivel = 1
+    visitados = set()
+    classificacao_completa = True
+
+    while opcoes_atual:
+        lista_opcoes, mapa_indice = montar_lista_opcoes(topicos_dict, opcoes_atual)
+        if not mapa_indice:
+            print("[AVISO] Lista de tópicos vazia durante a classificação.")
+            classificacao_completa = False
+            break
+
+        prompt_base = (
+            "Classifique a questão abaixo em um dos tópicos listados a seguir. "
+            "Informe APENAS o número correspondente ao tópico que melhor define o assunto da questão.\n\n"
+            f"[ENUNCIADO]: {enunciado_limpo}\n\n"
+            f"[GABARITO]: {gabarito_composto}\n\n"
+            f"[TÓPICOS NÍVEL {nivel}]:\n{lista_opcoes}\n"
+        )
+
+        numero_escolhido = None
+        for tentativa in range(2):
+            prompt = prompt_base if tentativa == 0 else (
+                prompt_base +
+                f"\nResponda apenas com um número da lista acima. Opções válidas: {', '.join(str(i) for i in mapa_indice.keys())}."
+            )
+
+            resposta = deepseek_chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=10
+            )
+
+            if not resposta:
+                print("[AVISO] Sem resposta da IA para seleção de tópico.")
+                classificacao_completa = False
+                numero_escolhido = None
+                break
+
+            numero = extrair_primeiro_inteiro(resposta)
+            if numero in mapa_indice:
+                numero_escolhido = numero
+                break
+
+            print(f"[AVISO] Resposta inválida para seleção de tópico: '{resposta}'. Tentativa {tentativa + 1}/2.")
+
+        if numero_escolhido is None:
+            if caminho_topicos:
+                print("[AVISO] Não foi possível avançar para um nível mais específico. Usando classificação parcial.")
+                classificacao_completa = False
+            else:
+                print("[ERRO] Não foi possível obter um número válido para o tópico inicial.")
+            break
+
+        topico_id = mapa_indice[numero_escolhido]
+        nome_topico = topicos_dict[topico_id]['nome']
+        print(f"[LOG] Nível {nivel}: selecionado tópico {numero_escolhido} -> ID {topico_id} ({nome_topico})")
+
+        if topico_id in visitados:
+            print(f"[AVISO] Ciclo detectado na hierarquia de tópicos (ID {topico_id}). Classificação parcial será utilizada.")
+            classificacao_completa = False
+            break
+
+        caminho_topicos.append(topico_id)
+        visitados.add(topico_id)
+
+        filhos = topicos_dict[topico_id]['filhos']
+        if not filhos:
+            print(f"[LOG] Tópico {topico_id} não possui filhos. Classificação encerrada.")
+            break
+
+        opcoes_atual = filhos
+        nivel += 1
+
+    if not caminho_topicos:
+        print("[AVISO] Nenhum tópico foi selecionado para a questão.")
+        return [], False
+
+    return caminho_topicos, classificacao_completa
+
+def inserir_classificacao_questao(conn, questao_id, topico_ids):
+    """
+    Insere registros na tabela classificacao_questao para os tópicos fornecidos.
+    Usa INSERT IGNORE para evitar duplicidades.
+    """
+    cursor = conn.cursor()
+    try:
+        for topico_id in topico_ids:
+            cursor.execute(
+                "INSERT IGNORE INTO classificacao_questao (id_questao, id_topico) VALUES (%s, %s)",
+                (questao_id, topico_id)
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+
+def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
+    """
+    Processa questões sem classificação hierárquica utilizando a API DeepSeek.
+    """
+    topicos_dict, topicos_raiz = carregar_hierarquia_topicos(conn)
+    if not topicos_raiz:
+        print("[ERRO] Não foi possível carregar tópicos raiz. Processo interrompido.")
+        return
+
+    questoes = buscar_questoes_sem_classificacao(
+        conn,
+        limite=limite,
+        filtro_instituicao=filtro_instituicao,
+        resto_mod5=resto_mod5,
+        filtro_ano=filtro_ano
+    )
+
+    if not questoes:
+        print("[LOG] Nenhuma questão sem classificação encontrada para os filtros informados.")
+        return
+
+    sucessos = 0
+    falhas = 0
+    classificacoes_completas = 0
+    classificacoes_parciais = 0
+
+    for idx, questao in enumerate(questoes, start=1):
+        print("\n" + "=" * 80)
+        print(f"[LOG] Classificando questão {idx}/{len(questoes)} | ID {questao['questao_id']} | Código {questao.get('codigo', '')}")
+        if questao.get('instituicao'):
+            print(f"[LOG] Instituição: {questao['instituicao']}")
+
+        caminho_topicos, classificacao_completa = classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz)
+
+        if not caminho_topicos:
+            print(f"[ERRO] Falha na classificação da questão {questao['questao_id']}.")
+            falhas += 1
+            continue
+
+        nomes_topicos = " > ".join(topicos_dict[t]['nome'] for t in caminho_topicos)
+        print(f"[LOG] Caminho de tópicos selecionado: {nomes_topicos}")
+        if not classificacao_completa:
+            print("[INFO] Classificação parcial registrada (tópico folha não identificado).")
+
+        try:
+            inserir_classificacao_questao(conn, questao['questao_id'], caminho_topicos)
+            sucessos += 1
+            if classificacao_completa:
+                classificacoes_completas += 1
+            else:
+                classificacoes_parciais += 1
+            print(f"[SUCESSO] Classificação salva para a questão {questao['questao_id']}.")
+        except Exception as e:
+            print(f"[ERRO] Falha ao salvar classificação da questão {questao['questao_id']}: {str(e)}")
+            falhas += 1
+
+    print("\n[LOG] === RESUMO DO MODO 6 ===")
+    print(f"[LOG] Questões processadas: {len(questoes)}")
+    print(f"[LOG] Classificações salvas: {sucessos}")
+    print(f"[LOG]   - Completas: {classificacoes_completas}")
+    print(f"[LOG]   - Parciais: {classificacoes_parciais}")
+    print(f"[LOG] Falhas: {falhas}")
 
 def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     """
@@ -2705,20 +3016,21 @@ if __name__ == "__main__":
     print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE/Outra) - Ano 2016 em diante")
     print("4 - Processar questões com comentários incompletos (DeepSeek AI)")
     print("5 - Processar questões específicas por ID (DeepSeek AI)")
+    print("6 - Classificar questões sem tópico (DeepSeek AI)")
     print()
     
     # Escolher modo de operação
     try:
-        modo = int(input("Digite sua opção (1, 2, 3, 4 ou 5): "))
-        if modo not in [1, 2, 3, 4, 5]:
-            print("Erro: Opção inválida! Digite 1, 2, 3, 4 ou 5.")
+        modo = int(input("Digite sua opção (1, 2, 3, 4, 5 ou 6): "))
+        if modo not in [1, 2, 3, 4, 5, 6]:
+            print("Erro: Opção inválida! Digite 1, 2, 3, 4, 5 ou 6.")
             exit(1)
     except ValueError:
-        print("Erro: Digite um número válido (1, 2, 3, 4 ou 5)!")
+        print("Erro: Digite um número válido (1, 2, 3, 4, 5 ou 6)!")
         exit(1)
     
     # Solicitar número total de questões
-    if modo not in [3, 4, 5]:
+    if modo not in [3, 4, 5, 6]:
         try:
             N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
             if N <= 0:
@@ -2889,6 +3201,73 @@ if __name__ == "__main__":
             print(f"[ERRO] Erro ao processar IDs: {str(e)}")
             conn.close()
             exit(1)
+    
+    elif modo == 6:
+        # MODO 6: Classificar questões sem tópico
+        print(f"\n[LOG] MODO 6: Classificando questões sem tópico")
+        print(f"[LOG] Usando API DeepSeek para navegação hierárquica de tópicos")
+        print()
+
+        limite = 20
+        limite_input = input("Informe o número máximo de questões a classificar (padrão 20, digite 0 para todas): ").strip()
+        if limite_input:
+            try:
+                limite_val = int(limite_input)
+                if limite_val < 0:
+                    print("Erro: o número deve ser maior ou igual a zero!")
+                    conn.close()
+                    exit(1)
+                limite = None if limite_val == 0 else limite_val
+            except ValueError:
+                print("Erro: informe um número inteiro válido!")
+                conn.close()
+                exit(1)
+        else:
+            limite = 20
+
+        filtro_instituicao = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
+        if not filtro_instituicao:
+            filtro_instituicao = None
+
+        resto_mod5 = None
+        resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
+        if resto_input:
+            try:
+                resto_val = int(resto_input)
+                if resto_val not in [0, 1, 2, 3, 4]:
+                    print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
+                    conn.close()
+                    exit(1)
+                resto_mod5 = resto_val
+            except ValueError:
+                print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
+                conn.close()
+                exit(1)
+
+        print(f"[LOG] Limite: {'todas' if limite is None else limite}")
+        if filtro_instituicao:
+            print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
+        if resto_mod5 is not None:
+            print(f"[LOG] Filtro questao_id %% 5 = {resto_mod5}")
+        filtro_ano = None
+        ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
+        if ano_input:
+            try:
+                ano_val = int(ano_input)
+                filtro_ano = ano_val
+                print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+            except ValueError:
+                print("Erro: ano deve ser um número inteiro válido!")
+                conn.close()
+                exit(1)
+
+        processar_classificacao_questoes_sem_topico(
+            conn,
+            limite=limite,
+            filtro_instituicao=filtro_instituicao,
+            resto_mod5=resto_mod5,
+            filtro_ano=filtro_ano
+        )
     
     conn.close()
     print("\n[LOG] Processo concluído!")
