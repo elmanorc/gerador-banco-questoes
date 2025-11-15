@@ -689,50 +689,93 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
         conn.rollback()
 
-def processar_questoes_por_id(conn, questao_ids):
+def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
     """
-    Processa questões específicas por ID usando a API DeepSeek.
+    Processa questões usando a API DeepSeek.
     Atualiza as colunas gabaritoIA e comentarioIA.
+    
+    Pode filtrar por:
+    - Lista de IDs de questões (questao_ids)
+    - Limite de questões (limite)
+    - Instituição (filtro_instituicao)
+    - Resto módulo 5 (resto_mod5)
+    - Ano mínimo (filtro_ano)
+    
+    Se questao_ids for fornecido, será combinado com os outros filtros.
+    Se questao_ids não for fornecido, usará apenas os outros filtros.
     """
-    print("[LOG] === MODO 5: Processando questões por ID ===")
+    print("[LOG] === MODO 5: Processando questões ===")
     
-    if not questao_ids:
-        print("[ERRO] Nenhum ID de questão fornecido.")
+    # Capturar horário inicial
+    horario_inicial = datetime.now()
+    horario_inicial_str = horario_inicial.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Verificar se pelo menos um critério foi fornecido
+    if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None:
+        print("[ERRO] Nenhum critério de busca fornecido. Forneça IDs ou pelo menos um filtro.")
         return
-    
-    print(f"[LOG] Buscando {len(questao_ids)} questão(ões) no banco de dados...")
     
     cursor = conn.cursor(dictionary=True)
     
-    # Buscar questões pelos IDs fornecidos
-    format_strings = ','.join(['%s'] * len(questao_ids))
-    query = f"""
+    # Construir query dinamicamente
+    query = """
     SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
            alternativaD, alternativaE, gabarito, comentario
     FROM questaoresidencia 
-    WHERE questao_id IN ({format_strings})
-    ORDER BY questao_id
+    WHERE 1=1
     """
+    params = []
     
-    cursor.execute(query, tuple(questao_ids))
+    # Filtrar por IDs se fornecido
+    if questao_ids:
+        format_strings = ','.join(['%s'] * len(questao_ids))
+        query += f" AND questao_id IN ({format_strings})"
+        params.extend(questao_ids)
+    
+    # Filtrar por instituição
+    if filtro_instituicao:
+        query += " AND instituicao LIKE %s"
+        params.append(f"%{filtro_instituicao}%")
+    
+    # Filtrar por resto módulo 5
+    if resto_mod5 is not None:
+        query += " AND MOD(questao_id, 5) = %s"
+        params.append(resto_mod5)
+    
+    # Filtrar por ano mínimo
+    if filtro_ano is not None:
+        query += " AND ano >= %s"
+        params.append(filtro_ano)
+    
+    query += " ORDER BY questao_id"
+    
+    # Aplicar limite se fornecido
+    if limite and limite > 0:
+        query += " LIMIT %s"
+        params.append(limite)
+    
+    cursor.execute(query, tuple(params))
     questoes = cursor.fetchall()
     
     if not questoes:
-        print(f"[ERRO] Nenhuma questão encontrada com os IDs fornecidos.")
+        print(f"[ERRO] Nenhuma questão encontrada com os critérios fornecidos.")
         return
     
     print(f"[LOG] Encontradas {len(questoes)} questão(ões) no banco de dados")
     
-    # Verificar se há IDs que não foram encontrados
-    ids_encontrados = {q['questao_id'] for q in questoes}
-    ids_nao_encontrados = [id_q for id_q in questao_ids if id_q not in ids_encontrados]
-    if ids_nao_encontrados:
-        print(f"[AVISO] Os seguintes IDs não foram encontrados: {ids_nao_encontrados}")
+    # Verificar se há IDs que não foram encontrados (apenas se IDs foram fornecidos)
+    ids_nao_encontrados = []
+    if questao_ids:
+        ids_encontrados = {q['questao_id'] for q in questoes}
+        ids_nao_encontrados = [id_q for id_q in questao_ids if id_q not in ids_encontrados]
+        if ids_nao_encontrados:
+            print(f"[AVISO] Os seguintes IDs não foram encontrados: {ids_nao_encontrados}")
     
     cursor.close()
     cursor = conn.cursor()
     sucessos = 0
     erros = 0
+    acertos = 0
     
     for i, questao in enumerate(questoes, 1):
         print(f"\n[LOG] Processando questão {i}/{len(questoes)}: ID {questao['questao_id']} (Código: {questao['codigo']})")
@@ -763,6 +806,10 @@ def processar_questoes_por_id(conn, questao_ids):
         autor = "DeepSeek AI"
         
         try:
+            # Contar acertos da IA (independente de ter justificativa)
+            if acertou:
+                acertos += 1
+            
             if acertou and justificativa:
                 # IA acertou - atualizar com justificativa completa
                 update_query = """
@@ -811,12 +858,31 @@ def processar_questoes_por_id(conn, questao_ids):
                 pass
             erros += 1
     
+    # Capturar horário final e calcular duração
+    horario_final = datetime.now()
+    horario_final_str = horario_final.strftime('%Y-%m-%d %H:%M:%S')
+    duracao_total = horario_final - horario_inicial
+    duracao_minutos = duracao_total.total_seconds() / 60
+    
     print(f"\n[LOG] === RESUMO DO MODO 5 ===")
     print(f"[LOG] Questões processadas: {len(questoes)}")
     print(f"[LOG] Sucessos: {sucessos}")
     print(f"[LOG] Erros: {erros}")
+    
+    # Calcular e exibir taxa de acerto da IA
+    if sucessos > 0:
+        taxa_acerto = (acertos / sucessos) * 100
+        print(f"[LOG] Acertos da IA: {acertos}/{sucessos} ({taxa_acerto:.2f}%)")
+    else:
+        print(f"[LOG] Acertos da IA: 0 (nenhuma questão processada com sucesso)")
+    
     if ids_nao_encontrados:
         print(f"[LOG] IDs não encontrados: {len(ids_nao_encontrados)}")
+    
+    # Exibir informações de tempo
+    print(f"[LOG] Horário inicial: {horario_inicial_str}")
+    print(f"[LOG] Horário final: {horario_final_str}")
+    print(f"[LOG] Duração da execução: {duracao_minutos:.2f} minutos")
 
 def get_topic_tree_recursive(conn, id_topico, current_level=1, max_level=4):
     print(f"[LOG] Buscando árvore de tópicos recursivamente para id_topico={id_topico} (nível {current_level})")
@@ -1553,13 +1619,25 @@ def clean_xml_illegal_chars(text):
     text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
     return text
 
-def configurar_metadados_documento(document, total_questoes):
+def limpar_nome_para_titulo(nome):
+    """
+    Remove caracteres inválidos e normaliza espaços para uso em metadados.
+    """
+    if not nome:
+        return "Banco de Questões"
+    nome_limpo = str(nome).strip()
+    nome_limpo = re.sub(r'[\\/:*?"<>|]+', ' ', nome_limpo)
+    nome_limpo = re.sub(r'\s+', ' ', nome_limpo)
+    return nome_limpo or "Banco de Questões"
+
+def configurar_metadados_documento(document, total_questoes, nome_arquivo_limpo=None):
     """
     Configura os metadados do documento DOCX.
     
     Args:
         document: Objeto Document do python-docx
         total_questoes: Número total de questões no banco
+        nome_arquivo_limpo: Nome amigável para composição do título
     """
     print("[LOG] Configurando metadados do documento...")
     
@@ -1569,7 +1647,8 @@ def configurar_metadados_documento(document, total_questoes):
     document.core_properties.author = "Questões MED"
     
     # 📝 Título do documento
-    document.core_properties.title = f"{total_questoes} Questões Recentes e Comentadas"
+    titulo_base = limpar_nome_para_titulo(nome_arquivo_limpo)
+    document.core_properties.title = f"E-book de Questões Comentadas de {titulo_base}"
     
     # 📚 Assunto/Tema
     document.core_properties.subject = "Banco de Questões de Medicina"
@@ -1578,7 +1657,7 @@ def configurar_metadados_documento(document, total_questoes):
     document.core_properties.keywords = "medicina, residência médica, banco de questões"
     
     # 👔 Gerente/Responsável
-    document.core_properties.manager = "Professor Elmano Cavalcanti"
+    document.core_properties.manager = "Questões MED"
     
     # 📂 Categoria
     document.core_properties.category = "Educação Médica"
@@ -1587,7 +1666,7 @@ def configurar_metadados_documento(document, total_questoes):
     data_geracao = datetime.now().strftime('%d/%m/%Y às %H:%M')
     document.core_properties.comments = (
         f"Banco de questões de provas de residência médica"
-        f"Contém {total_questoes} questões comentadas e organizadas em uma ampla hierarquia de tópicos."
+        f"Contém questões comentadas e organizadas em uma ampla hierarquia de tópicos."
     )
     
     # 📊 Último editor
@@ -1992,7 +2071,8 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     document = Document()
     
     # Configurar metadados do documento
-    configurar_metadados_documento(document, total_questoes)
+    nome_titulo_documento = f"{total_questoes} Questões"
+    configurar_metadados_documento(document, total_questoes, nome_titulo_documento)
     
     # Configurar estilo padrão
     style = document.styles['Normal']
@@ -2140,6 +2220,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
         return None
     
     nome_topico = topico_info['nome']
+    nome_titulo_limpo = limpar_nome_para_titulo(nome_topico)
     print(f"[LOG] Tópico selecionado: {nome_topico}")
     
     # Informar comportamento de seções baseado no número de questões
@@ -2423,7 +2504,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     document = Document()
     
     # Configurar metadados do documento
-    configurar_metadados_documento(document, len(questoes_com_topico))
+    configurar_metadados_documento(document, len(questoes_com_topico), nome_titulo_limpo)
     
     # Configurar estilo padrão
     style = document.styles['Normal']
@@ -2552,7 +2633,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nome_arquivo_limpo = nome_topico.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    nome_arquivo_limpo = nome_titulo_limpo.replace(" ", "_")
     output_filename = f"banco_questoes_{nome_arquivo_limpo}_{len(questoes_com_topico)}_{data_atual}.docx"
     
     document.save(output_filename)
@@ -2890,8 +2971,9 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
     # Criar documento
     document = Document()
     
+    nome_titulo_instituicao = limpar_nome_para_titulo(instituicao)
     # Configurar metadados do documento
-    configurar_metadados_documento(document, len(questoes_com_topico))
+    configurar_metadados_documento(document, len(questoes_com_topico), nome_titulo_instituicao)
     
     # Configurar estilo padrão
     style = document.styles['Normal']
@@ -2999,7 +3081,8 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
     
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = f"banco_questoes_{instituicao}_{len(questoes_com_topico)}_{data_atual}.docx"
+    nome_arquivo_limpo = nome_titulo_instituicao.replace(" ", "_")
+    output_filename = f"banco_questoes_{nome_arquivo_limpo}_{len(questoes_com_topico)}_{data_atual}.docx"
     
     document.save(output_filename)
     print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
@@ -3168,37 +3251,112 @@ if __name__ == "__main__":
         processar_questoes_incompletas(conn, instituicao_input, resto)
     
     elif modo == 5:
-        # MODO 5: Processar questões específicas por ID
-        print(f"\n[LOG] MODO 5: Processando questões específicas por ID")
+        # MODO 5: Processar questões específicas por ID e/ou filtros
+        print(f"\n[LOG] MODO 5: Processando questões por ID e/ou filtros")
         print(f"[LOG] Usando API DeepSeek para análise e justificativa")
         print()
         
-        # Solicitar IDs das questões
-        try:
-            ids_input = input("Informe um ou mais IDs de questões (separados por vírgula): ")
-            ids_str = [id_str.strip() for id_str in ids_input.split(',')]
-            questao_ids = []
-            
-            for id_str in ids_str:
-                try:
-                    questao_id = int(id_str)
-                    if questao_id <= 0:
-                        print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser positivo)")
-                        continue
-                    questao_ids.append(questao_id)
-                except ValueError:
-                    print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser um número)")
-            
-            if not questao_ids:
-                print("[ERRO] Nenhum ID válido fornecido!")
+        # Solicitar IDs das questões (opcional)
+        questao_ids = None
+        ids_input = input("Informe um ou mais IDs de questões (separados por vírgula, ou Enter para não filtrar por ID): ").strip()
+        if ids_input:
+            try:
+                ids_str = [id_str.strip() for id_str in ids_input.split(',')]
+                questao_ids = []
+                
+                for id_str in ids_str:
+                    try:
+                        questao_id = int(id_str)
+                        if questao_id <= 0:
+                            print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser positivo)")
+                            continue
+                        questao_ids.append(questao_id)
+                    except ValueError:
+                        print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser um número)")
+                
+                if questao_ids:
+                    print(f"[LOG] IDs de questões a processar: {questao_ids}")
+                else:
+                    questao_ids = None
+                    print("[AVISO] Nenhum ID válido fornecido, continuando apenas com filtros")
+            except Exception as e:
+                print(f"[AVISO] Erro ao processar IDs: {str(e)}, continuando apenas com filtros")
+                questao_ids = None
+        
+        # Solicitar limite (opcional)
+        limite = None
+        limite_input = input("Informe o número máximo de questões a processar (padrão todas, digite 0 para todas): ").strip()
+        if limite_input:
+            try:
+                limite_val = int(limite_input)
+                if limite_val < 0:
+                    print("Erro: o número deve ser maior ou igual a zero!")
+                    conn.close()
+                    exit(1)
+                limite = None if limite_val == 0 else limite_val
+            except ValueError:
+                print("Erro: informe um número inteiro válido!")
                 conn.close()
                 exit(1)
-            
-            print(f"[LOG] IDs de questões a processar: {questao_ids}")
-            processar_questoes_por_id(conn, questao_ids)
-            
+        
+        # Solicitar filtro de instituição (opcional)
+        filtro_instituicao = None
+        instituicao_input = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
+        if instituicao_input:
+            filtro_instituicao = instituicao_input
+        
+        # Solicitar resto módulo 5 (opcional)
+        resto_mod5 = None
+        resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
+        if resto_input:
+            try:
+                resto_val = int(resto_input)
+                if resto_val not in [0, 1, 2, 3, 4]:
+                    print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
+                    conn.close()
+                    exit(1)
+                resto_mod5 = resto_val
+            except ValueError:
+                print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
+                conn.close()
+                exit(1)
+        
+        # Solicitar filtro de ano mínimo (opcional)
+        filtro_ano = None
+        ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
+        if ano_input:
+            try:
+                ano_val = int(ano_input)
+                filtro_ano = ano_val
+            except ValueError:
+                print("Erro: ano deve ser um número inteiro válido!")
+                conn.close()
+                exit(1)
+        
+        # Validar se pelo menos um critério foi fornecido
+        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None:
+            print("[ERRO] Nenhum critério de busca fornecido! Forneça IDs ou pelo menos um filtro.")
+            conn.close()
+            exit(1)
+        
+        # Exibir resumo dos filtros
+        if questao_ids:
+            print(f"[LOG] IDs de questões: {questao_ids}")
+        if limite is not None:
+            print(f"[LOG] Limite: {limite}")
+        if filtro_instituicao:
+            print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
+        if resto_mod5 is not None:
+            print(f"[LOG] Filtro questao_id % 5 = {resto_mod5}")
+        if filtro_ano is not None:
+            print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+        
+        try:
+            processar_questoes_por_id(conn, questao_ids=questao_ids, limite=limite, 
+                                     filtro_instituicao=filtro_instituicao, 
+                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano)
         except Exception as e:
-            print(f"[ERRO] Erro ao processar IDs: {str(e)}")
+            print(f"[ERRO] Erro ao processar questões: {str(e)}")
             conn.close()
             exit(1)
     
