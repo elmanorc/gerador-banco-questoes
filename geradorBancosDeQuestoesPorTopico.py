@@ -197,23 +197,39 @@ def identificar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     
     return questoes_incompletas
 
-def chamar_api_deepseek(enunciado, alternativas, gabarito_correto):
+def chamar_api_deepseek(enunciado, alternativas, gabarito_correto, classificacao=None):
     """
     Chama a API DeepSeek para analisar uma questão e obter resposta e justificativa.
+    
+    Args:
+        enunciado: Texto do enunciado da questão
+        alternativas: Dicionário com as alternativas (alternativaA, alternativaB, etc.)
+        gabarito_correto: Letra da alternativa correta
+        classificacao: String com a classificação hierárquica da questão (ex: "SUS > Diretrizes e Princípios do SUS > ...")
     """
     print(f"[LOG] Chamando API DeepSeek para questão...")
     
+    # Extrair texto puro do enunciado (caso esteja em HTML)
+    enunciado_texto = extrair_texto_sem_imagens(enunciado) if enunciado else ""
+    
     # Montar o texto da questão
-    texto_questao = f"Enunciado: {enunciado}\n\n"
+    texto_questao = f"[ENUNCIADO]: {enunciado_texto}\n\n"
     for alt in ['A', 'B', 'C', 'D', 'E']:
         if alternativas.get(f'alternativa{alt}'):
-            texto_questao += f"{alt}) {alternativas[f'alternativa{alt}']}\n"
+            # Também extrair texto das alternativas caso estejam em HTML
+            alt_texto = extrair_texto_sem_imagens(alternativas[f'alternativa{alt}']) if alternativas.get(f'alternativa{alt}') else ""
+            texto_questao += f"{alt}) {alt_texto}\n"
+    
+    # Adicionar classificação ao contexto se disponível
+    contexto_classificacao = ""
+    if classificacao:
+        contexto_classificacao = f"\n[ASSUNTO DA QUESTÃO]: {classificacao}\n\nEsta classificação indica o assunto/tema ao qual a questão se refere na hierarquia de tópicos médicos.\n"
     
     # Primeira chamada: solicitar apenas a resposta
     prompt_resposta = f"""
 Analise a seguinte questão de medicina e responda APENAS com a letra da alternativa correta (A, B, C, D ou E).
 
-{texto_questao}
+{contexto_classificacao}{texto_questao}
 
 Responda apenas com a letra da alternativa correta:
 """
@@ -249,7 +265,7 @@ A questão anterior foi respondida corretamente. Agora forneça uma justificativ
 3. Uso de recursos visuais como tabelas, emojis e formatação markdown
 4. Estrutura organizada com títulos e seções
 
-{texto_questao}
+{contexto_classificacao}{texto_questao}
 
 Resposta correta: {resposta_ia}
 
@@ -502,6 +518,64 @@ def inserir_classificacao_questao(conn, questao_id, topico_ids):
     finally:
         cursor.close()
 
+def obter_classificacao_questao(conn, questao_id, topicos_dict):
+    """
+    Obtém a classificação completa de uma questão (hierarquia de tópicos).
+    Retorna uma string no formato "Tópico Raiz > Tópico Nível 2 > ... > Tópico Folha"
+    ou None se a questão não tiver classificação.
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Buscar todos os tópicos associados à questão
+        cursor.execute("""
+            SELECT id_topico 
+            FROM classificacao_questao 
+            WHERE id_questao = %s
+            ORDER BY id_topico
+        """, (questao_id,))
+        
+        topico_ids = [row['id_topico'] for row in cursor.fetchall()]
+        
+        if not topico_ids:
+            return None
+        
+        # Construir o caminho completo da hierarquia
+        # Encontrar o tópico mais específico (folha) - aquele que não é pai de nenhum outro na lista
+        topicos_na_classificacao = set(topico_ids)
+        topico_folha = None
+        
+        for topico_id in topico_ids:
+            if topico_id in topicos_dict:
+                filhos = topicos_dict[topico_id].get('filhos', [])
+                # Se nenhum filho está na classificação, este é o tópico folha
+                if not any(filho in topicos_na_classificacao for filho in filhos):
+                    topico_folha = topico_id
+                    break
+        
+        # Se não encontrou folha, usar o último da lista
+        if topico_folha is None:
+            topico_folha = topico_ids[-1]
+        
+        # Construir caminho completo do tópico folha até a raiz
+        caminho = []
+        topico_atual = topico_folha
+        
+        while topico_atual and topico_atual in topicos_dict:
+            caminho.insert(0, topico_atual)
+            topico_atual = topicos_dict[topico_atual].get('id_pai')
+        
+        # Construir string de classificação
+        if caminho:
+            nomes_topicos = [topicos_dict[tid]['nome'] for tid in caminho if tid in topicos_dict]
+            return " > ".join(nomes_topicos)
+        
+        return None
+    except Exception as e:
+        print(f"[AVISO] Erro ao obter classificação da questão {questao_id}: {str(e)}")
+        return None
+    finally:
+        cursor.close()
+
 def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
     """
     Processa questões sem classificação hierárquica utilizando a API DeepSeek.
@@ -580,6 +654,9 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     
     print(f"[LOG] Processando {len(questoes_incompletas)} questões incompletas...")
     
+    # Carregar hierarquia de tópicos para obter classificações
+    topicos_dict, _ = carregar_hierarquia_topicos(conn)
+    
     cursor = conn.cursor()
     sucessos = 0
     erros = 0
@@ -589,6 +666,11 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
     
     for i, questao in enumerate(questoes_incompletas, 1):
         print(f"\n[LOG] Processando questão {i}/{len(questoes_incompletas)}: {questao['codigo']}")
+        
+        # Obter classificação da questão
+        classificacao = obter_classificacao_questao(conn, questao['questao_id'], topicos_dict)
+        if classificacao:
+            print(f"[LOG] Classificação encontrada: {classificacao}")
         
         # Preparar alternativas
         alternativas = {
@@ -603,7 +685,8 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         resposta_ia, justificativa, acertou = chamar_api_deepseek(
             questao['enunciado'], 
             alternativas, 
-            questao['gabarito']
+            questao['gabarito'],
+            classificacao=classificacao
         )
         
         if resposta_ia is None:
@@ -747,6 +830,11 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
         query += " AND ano >= %s"
         params.append(filtro_ano)
     
+    # Filtrar questões já respondidas corretamente (apenas se IDs não foram fornecidos)
+    if not questao_ids:
+        query += " AND NOT (gabaritoIA = gabarito AND comentarioIA IS NOT NULL)"
+        print("[LOG] Filtro aplicado: excluindo questões já respondidas corretamente pela IA")
+    
     query += " ORDER BY questao_id"
     
     # Aplicar limite se fornecido
@@ -772,6 +860,10 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
             print(f"[AVISO] Os seguintes IDs não foram encontrados: {ids_nao_encontrados}")
     
     cursor.close()
+    
+    # Carregar hierarquia de tópicos para obter classificações
+    topicos_dict, _ = carregar_hierarquia_topicos(conn)
+    
     cursor = conn.cursor()
     sucessos = 0
     erros = 0
@@ -779,6 +871,11 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
     
     for i, questao in enumerate(questoes, 1):
         print(f"\n[LOG] Processando questão {i}/{len(questoes)}: ID {questao['questao_id']} (Código: {questao['codigo']})")
+        
+        # Obter classificação da questão
+        classificacao = obter_classificacao_questao(conn, questao['questao_id'], topicos_dict)
+        if classificacao:
+            print(f"[LOG] Classificação encontrada: {classificacao}")
         
         # Preparar alternativas
         alternativas = {
@@ -793,7 +890,8 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
         resposta_ia, justificativa, acertou = chamar_api_deepseek(
             questao['enunciado'], 
             alternativas, 
-            questao['gabarito']
+            questao['gabarito'],
+            classificacao=classificacao
         )
         
         if resposta_ia is None:
