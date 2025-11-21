@@ -1288,7 +1288,8 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
                 usar_src_absoluto=True
             )
         else:
-            add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios")
+            add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                usar_src_absoluto=True)
         document.add_paragraph("")  # Espaço
         questao_num += 1
     
@@ -1911,7 +1912,8 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
             c.qtd
         FROM questaoresidencia q
         JOIN cotas c ON q.area = c.area
-        WHERE CHAR_LENGTH(q.comentario) >= 500 AND q.ano >= {ano_minimo}
+        WHERE (CHAR_LENGTH(q.comentario) >= 500 OR q.gabaritoIA=q.gabarito)
+         AND q.ano >= {ano_minimo}
     )
     SELECT 
         o.*
@@ -2442,7 +2444,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     FROM questaoresidencia q
     INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
     WHERE cq.id_topico IN ({format_strings})
-      AND CHAR_LENGTH(q.comentario) >= 500 
+      AND (CHAR_LENGTH(q.comentario) >= 500 OR q.gabaritoIA=q.gabarito)
       AND q.ano >= {ano_minimo}
     ORDER BY ordem
     LIMIT %s
