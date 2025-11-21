@@ -772,7 +772,7 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
         conn.rollback()
 
-def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
+def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_topico=None):
     """
     Processa questões usando a API DeepSeek.
     Atualiza as colunas gabaritoIA e comentarioIA.
@@ -783,9 +783,13 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
     - Instituição (filtro_instituicao)
     - Resto módulo 5 (resto_mod5)
     - Ano mínimo (filtro_ano)
+    - Tópico (filtro_topico) - inclui questões do tópico e todos os seus descendentes
     
     Se questao_ids for fornecido, será combinado com os outros filtros.
     Se questao_ids não for fornecido, usará apenas os outros filtros.
+    
+    Quando filtro_topico é fornecido, busca apenas questões sem comentários
+    (comentario IS NULL AND comentarioIA IS NULL).
     """
     print("[LOG] === MODO 5: Processando questões ===")
     
@@ -794,48 +798,110 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
     horario_inicial_str = horario_inicial.strftime('%Y-%m-%d %H:%M:%S')
     
     # Verificar se pelo menos um critério foi fornecido
-    if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None:
+    if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None:
         print("[ERRO] Nenhum critério de busca fornecido. Forneça IDs ou pelo menos um filtro.")
         return
     
     cursor = conn.cursor(dictionary=True)
     
+    # Se filtro_topico for fornecido, obter todos os descendentes do tópico
+    ids_topicos_filtro = None
+    if filtro_topico is not None:
+        print(f"[LOG] Buscando questões do tópico {filtro_topico} e seus descendentes...")
+        cursor.execute("""
+            WITH RECURSIVE topico_descendentes AS (
+                SELECT id, nome, 1 as nivel
+                FROM topico 
+                WHERE id = %s
+                
+                UNION ALL
+                
+                SELECT t.id, t.nome, td.nivel + 1
+                FROM topico t
+                INNER JOIN topico_descendentes td ON t.id_pai = td.id
+                WHERE td.nivel < 10
+            )
+            SELECT id FROM topico_descendentes
+        """, (filtro_topico,))
+        
+        descendentes = cursor.fetchall()
+        ids_topicos_filtro = [d['id'] for d in descendentes]
+        print(f"[LOG] Tópico {filtro_topico} tem {len(ids_topicos_filtro)} descendentes (incluindo ele próprio)")
+        
+        if not ids_topicos_filtro:
+            print(f"[ERRO] Não foi possível obter descendentes do tópico {filtro_topico}")
+            return
+    
     # Construir query dinamicamente
-    query = """
-    SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
-           alternativaD, alternativaE, gabarito, comentario
-    FROM questaoresidencia 
-    WHERE 1=1
-    """
+    # Se houver filtro por tópico, precisamos fazer JOIN com classificacao_questao
+    if ids_topicos_filtro:
+        query = """
+        SELECT DISTINCT q.questao_id, q.codigo, q.enunciado, q.alternativaA, q.alternativaB, q.alternativaC, 
+               q.alternativaD, q.alternativaE, q.gabarito, q.comentario
+        FROM questaoresidencia q
+        INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
+        WHERE 1=1
+        """
+    else:
+        query = """
+        SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
+               alternativaD, alternativaE, gabarito, comentario
+        FROM questaoresidencia 
+        WHERE 1=1
+        """
     params = []
     
     # Filtrar por IDs se fornecido
     if questao_ids:
         format_strings = ','.join(['%s'] * len(questao_ids))
-        query += f" AND questao_id IN ({format_strings})"
+        if ids_topicos_filtro:
+            query += f" AND q.questao_id IN ({format_strings})"
+        else:
+            query += f" AND questao_id IN ({format_strings})"
         params.extend(questao_ids)
     
     # Filtrar por instituição
     if filtro_instituicao:
-        query += " AND instituicao LIKE %s"
+        if ids_topicos_filtro:
+            query += " AND q.instituicao LIKE %s"
+        else:
+            query += " AND instituicao LIKE %s"
         params.append(f"%{filtro_instituicao}%")
     
     # Filtrar por resto módulo 5
     if resto_mod5 is not None:
-        query += " AND MOD(questao_id, 5) = %s"
+        if ids_topicos_filtro:
+            query += " AND MOD(q.questao_id, 5) = %s"
+        else:
+            query += " AND MOD(questao_id, 5) = %s"
         params.append(resto_mod5)
     
     # Filtrar por ano mínimo
     if filtro_ano is not None:
-        query += " AND ano >= %s"
+        if ids_topicos_filtro:
+            query += " AND q.ano >= %s"
+        else:
+            query += " AND ano >= %s"
         params.append(filtro_ano)
     
-    # Filtrar questões já respondidas corretamente (apenas se IDs não foram fornecidos)
-    if not questao_ids:
+    # Filtrar por tópico (incluindo descendentes)
+    if ids_topicos_filtro:
+        format_strings = ','.join(['%s'] * len(ids_topicos_filtro))
+        query += f" AND cq.id_topico IN ({format_strings})"
+        params.extend(ids_topicos_filtro)
+        # Quando há filtro por tópico, buscar apenas questões sem comentários
+        query += " AND q.comentario IS NULL AND q.comentarioIA IS NULL"
+        print("[LOG] Filtro aplicado: apenas questões sem comentários (comentario IS NULL AND comentarioIA IS NULL)")
+    
+    # Filtrar questões já respondidas corretamente (apenas se IDs não foram fornecidos e não há filtro por tópico)
+    if not questao_ids and not ids_topicos_filtro:
         query += " AND NOT (gabaritoIA = gabarito AND comentarioIA IS NOT NULL)"
         print("[LOG] Filtro aplicado: excluindo questões já respondidas corretamente pela IA")
     
-    query += " ORDER BY questao_id"
+    if ids_topicos_filtro:
+        query += " ORDER BY q.questao_id"
+    else:
+        query += " ORDER BY questao_id"
     
     # Aplicar limite se fornecido
     if limite and limite > 0:
@@ -1786,10 +1852,16 @@ def configurar_metadados_documento(document, total_questoes, nome_arquivo_limpo=
     print(f"  - Palavras-chave: {document.core_properties.keywords}")
     print(f"  - Data criação: {document.core_properties.created.strftime('%d/%m/%Y %H:%M')}")
 
-def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True):
+def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018):
     """
     Gera um banco de questões usando consulta SQL específica com N questões
     e organizando hierarquicamente com profundidade máxima de nível 4.
+    
+    Args:
+        conn: Conexão com o banco de dados
+        total_questoes: Número total de questões desejadas
+        permitir_repeticao: Se permite questões repetidas
+        ano_minimo: Ano mínimo para filtrar as questões (padrão: 2018)
     """
     print(f"[LOG] Gerando banco de questões com consulta SQL específica - {total_questoes} questões...")
     
@@ -1839,7 +1911,7 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
             c.qtd
         FROM questaoresidencia q
         JOIN cotas c ON q.area = c.area
-        WHERE CHAR_LENGTH(q.comentario) >= 500 AND q.ano >= 2018
+        WHERE CHAR_LENGTH(q.comentario) >= 500 AND q.ano >= {ano_minimo}
     )
     SELECT 
         o.*
@@ -2295,7 +2367,7 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     
     return output_filename
 
-def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True):
+def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018):
     """
     Gera um banco de questões de um tópico específico (qualquer nível na hierarquia).
     
@@ -2304,6 +2376,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
         id_topico: ID do tópico que define a área específica (qualquer nível)
         total_questoes: Número total de questões desejadas
         permitir_repeticao: Se permite questões repetidas
+        ano_minimo: Ano mínimo para filtrar as questões (padrão: 2018)
     """
     print(f"[LOG] Gerando banco de questões para tópico específico - Tópico: {id_topico}, {total_questoes} questões...")
     
@@ -2370,7 +2443,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
     WHERE cq.id_topico IN ({format_strings})
       AND CHAR_LENGTH(q.comentario) >= 500 
-      AND q.ano >= 2018
+      AND q.ano >= {ano_minimo}
     ORDER BY ordem
     LIMIT %s
     """
@@ -2740,18 +2813,19 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     
     return output_filename
 
-def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
+def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016):
     """
-    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada) e ano >= 2016.
+    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada).
     Recupera todas as questões que atendam aos critérios, sem cotas por área.
     
     Args:
         conn: Conexão com o banco de dados
         instituicao: 'REVALIDA NACIONAL' ou 'ENARE'
         permitir_repeticao: Se permite questões repetidas
+        ano_minimo: Ano mínimo para filtrar as questões (padrão: 2016)
     """
     print(f"[LOG] Gerando banco de questões para {instituicao}...")
-    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= 2016, comentário >= 400 caracteres")
+    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= {ano_minimo}, comentário >= 400 caracteres")
     print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
     
     cursor = conn.cursor(dictionary=True)
@@ -2762,7 +2836,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True):
         q.*
     FROM questaoresidencia q
     WHERE (CHAR_LENGTH(comentario)>400 or (CHAR_LENGTH(comentarioIA)>400 and gabaritoIA=gabarito))
-      AND q.ano >= 2016
+      AND q.ano >= {ano_minimo}
       AND q.instituicao LIKE '%{instituicao}%'
     ORDER BY q.ano DESC, q.questao_id
     """
@@ -3194,9 +3268,9 @@ if __name__ == "__main__":
     print("Escolha o modo de geração:")
     print("1 - Banco completo com 6 áreas médicas (Modo original)")
     print("2 - Banco de tópico específico (qualquer nível na hierarquia)")
-    print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE/Outra) - Ano 2016 em diante")
+    print("3 - Banco por instituição (REVALIDA NACIONAL/ENARE/Outra)")
     print("4 - Processar questões com comentários incompletos (DeepSeek AI)")
-    print("5 - Processar questões específicas por ID (DeepSeek AI)")
+    print("5 - Responder questões usando a IA (DeepSeek)")
     print("6 - Classificar questões sem tópico (DeepSeek AI)")
     print()
     
@@ -3221,6 +3295,18 @@ if __name__ == "__main__":
             print("Erro: N deve ser um número inteiro!")
             exit(1)
     
+    # Solicitar ano mínimo para modos 1, 2 e 3
+    ano_minimo = None
+    if modo in [1, 2, 3]:
+        try:
+            ano_minimo = int(input("Ano mínimo para filtrar as questões (ex: 2016, 2018, 2020): "))
+            if ano_minimo < 1900 or ano_minimo > 2100:
+                print("Erro: O ano deve ser um valor razoável (entre 1900 e 2100)!")
+                exit(1)
+        except ValueError:
+            print("Erro: O ano deve ser um número inteiro!")
+            exit(1)
+    
     # Configurar permitir repetição (fixo como False para evitar questões duplicadas)
     permitir_repeticao = False
     
@@ -3239,8 +3325,10 @@ if __name__ == "__main__":
         print(f"  5. Obstetrícia: {round(N * 0.1)} questões (10%)")
         print(f"  6. Medicina Preventiva: {round(N * 0.2)} questões (20%)")
         print()
+        print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
+        print()
         
-        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao)
+        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
         
     elif modo == 2:
         # MODO 2: Banco de tópico específico (qualquer nível)
@@ -3268,10 +3356,11 @@ if __name__ == "__main__":
             exit(1)
         
         print(f"[LOG] Tópico selecionado: {id_topico}")
+        print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
         print(f"[LOG] Gerando {N} questões do tópico e seus descendentes...")
         print()
         
-        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao)
+        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3309,11 +3398,12 @@ if __name__ == "__main__":
                     print("Erro: O nome da instituição não pode ser vazio!")
         
         print(f"[LOG] Instituição selecionada: {instituicao_input}")
-        print(f"[LOG] Filtros aplicados: ano >= 2016, comentário >= 400 caracteres")
+        print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
+        print(f"[LOG] Filtros aplicados: ano >= {ano_minimo}, comentário >= 400 caracteres")
         print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
         print()
         
-        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao)
+        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3350,7 +3440,7 @@ if __name__ == "__main__":
     
     elif modo == 5:
         # MODO 5: Processar questões específicas por ID e/ou filtros
-        print(f"\n[LOG] MODO 5: Processando questões por ID e/ou filtros")
+        print(f"\n[LOG] MODO 5: Responder questões usando a IA (DeepSeek)")
         print(f"[LOG] Usando API DeepSeek para análise e justificativa")
         print()
         
@@ -3431,8 +3521,36 @@ if __name__ == "__main__":
                 conn.close()
                 exit(1)
         
+        # Solicitar filtro de tópico (opcional)
+        filtro_topico = None
+        print()
+        print("Códigos dos tópicos raiz das principais áreas:")
+        print("  33  - Cirurgia")
+        print("  100 - Clínica Médica")
+        print("  48  - Pediatria")
+        print("  183 - Ginecologia")
+        print("  218 - Obstetrícia")
+        print("  29  - Medicina Preventiva")
+        print()
+        print("Ou informe o código de qualquer tópico (raiz ou sub-tópico) desejado.")
+        print("O sistema irá buscar questões sem comentários associadas ao tópico e todos os seus descendentes.")
+        print()
+        topico_input = input("Deseja filtrar por tópico? (digite o código do tópico ou Enter para não filtrar): ").strip()
+        if topico_input:
+            try:
+                topico_val = int(topico_input)
+                if topico_val <= 0:
+                    print("Erro: o código do tópico deve ser um número positivo!")
+                    conn.close()
+                    exit(1)
+                filtro_topico = topico_val
+            except ValueError:
+                print("Erro: o código do tópico deve ser um número inteiro válido!")
+                conn.close()
+                exit(1)
+        
         # Validar se pelo menos um critério foi fornecido
-        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None:
+        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None:
             print("[ERRO] Nenhum critério de busca fornecido! Forneça IDs ou pelo menos um filtro.")
             conn.close()
             exit(1)
@@ -3448,11 +3566,14 @@ if __name__ == "__main__":
             print(f"[LOG] Filtro questao_id % 5 = {resto_mod5}")
         if filtro_ano is not None:
             print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+        if filtro_topico is not None:
+            print(f"[LOG] Filtro tópico: {filtro_topico} (incluindo descendentes)")
+            print(f"[LOG] Buscando apenas questões sem comentários (comentario IS NULL AND comentarioIA IS NULL)")
         
         try:
             processar_questoes_por_id(conn, questao_ids=questao_ids, limite=limite, 
                                      filtro_instituicao=filtro_instituicao, 
-                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano)
+                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano, filtro_topico=filtro_topico)
         except Exception as e:
             print(f"[ERRO] Erro ao processar questões: {str(e)}")
             conn.close()
