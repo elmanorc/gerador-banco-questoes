@@ -518,6 +518,59 @@ def inserir_classificacao_questao(conn, questao_id, topico_ids):
     finally:
         cursor.close()
 
+def substituir_classificacao_questao(conn, questao_id, topico_ids):
+    """
+    Substitui a classificação de uma questão removendo as antigas e inserindo as novas.
+    Primeiro remove todas as classificações existentes, depois insere as novas.
+    """
+    cursor = conn.cursor()
+    try:
+        # Remover classificações antigas
+        cursor.execute(
+            "DELETE FROM classificacao_questao WHERE id_questao = %s",
+            (questao_id,)
+        )
+        # Inserir novas classificações
+        for topico_id in topico_ids:
+            cursor.execute(
+                "INSERT INTO classificacao_questao (id_questao, id_topico) VALUES (%s, %s)",
+                (questao_id, topico_id)
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+
+def buscar_questoes_por_ids(conn, questao_ids):
+    """
+    Busca questões por uma lista específica de IDs.
+    Retorna uma lista de questões com os dados necessários para classificação.
+    """
+    if not questao_ids:
+        return []
+    
+    print(f"[LOG] Buscando {len(questao_ids)} questões por IDs específicos...")
+    cursor = conn.cursor(dictionary=True)
+    
+    # Criar placeholders para a cláusula IN
+    placeholders = ','.join(['%s'] * len(questao_ids))
+    query = f"""
+    SELECT q.questao_id, q.codigo, q.enunciado, q.gabarito, COALESCE(q.gabarito_texto, '') AS gabarito_texto,
+           COALESCE(q.instituicao, '') AS instituicao
+    FROM questaoresidencia q
+    WHERE q.questao_id IN ({placeholders})
+    ORDER BY q.questao_id
+    """
+    
+    cursor.execute(query, tuple(questao_ids))
+    questoes = cursor.fetchall()
+    cursor.close()
+    
+    print(f"[LOG] Questões encontradas: {len(questoes)}")
+    return questoes
+
 def obter_classificacao_questao(conn, questao_id, topicos_dict):
     """
     Obtém a classificação completa de uma questão (hierarquia de tópicos).
@@ -635,6 +688,71 @@ def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instit
     print("\n[LOG] === RESUMO DO MODO 6 ===")
     print(f"[LOG] Questões processadas: {len(questoes)}")
     print(f"[LOG] Classificações salvas: {sucessos}")
+    print(f"[LOG]   - Completas: {classificacoes_completas}")
+    print(f"[LOG]   - Parciais: {classificacoes_parciais}")
+    print(f"[LOG] Falhas: {falhas}")
+
+def processar_classificacao_questoes_por_ids(conn, questao_ids):
+    """
+    Processa e reclassifica questões específicas informadas por uma lista de IDs.
+    Substitui a classificação existente no banco.
+    """
+    topicos_dict, topicos_raiz = carregar_hierarquia_topicos(conn)
+    if not topicos_raiz:
+        print("[ERRO] Não foi possível carregar tópicos raiz. Processo interrompido.")
+        return
+
+    questoes = buscar_questoes_por_ids(conn, questao_ids)
+
+    if not questoes:
+        print("[LOG] Nenhuma questão encontrada para os IDs informados.")
+        return
+
+    # Verificar se há IDs que não foram encontrados
+    ids_encontrados = {q['questao_id'] for q in questoes}
+    ids_nao_encontrados = set(questao_ids) - ids_encontrados
+    if ids_nao_encontrados:
+        print(f"[AVISO] Os seguintes IDs não foram encontrados no banco: {sorted(ids_nao_encontrados)}")
+
+    sucessos = 0
+    falhas = 0
+    classificacoes_completas = 0
+    classificacoes_parciais = 0
+
+    for idx, questao in enumerate(questoes, start=1):
+        print("\n" + "=" * 80)
+        print(f"[LOG] Reclassificando questão {idx}/{len(questoes)} | ID {questao['questao_id']} | Código {questao.get('codigo', '')}")
+        if questao.get('instituicao'):
+            print(f"[LOG] Instituição: {questao['instituicao']}")
+
+        caminho_topicos, classificacao_completa = classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz)
+
+        if not caminho_topicos:
+            print(f"[ERRO] Falha na classificação da questão {questao['questao_id']}.")
+            falhas += 1
+            continue
+
+        nomes_topicos = " > ".join(topicos_dict[t]['nome'] for t in caminho_topicos)
+        print(f"[LOG] Caminho de tópicos selecionado: {nomes_topicos}")
+        if not classificacao_completa:
+            print("[INFO] Classificação parcial registrada (tópico folha não identificado).")
+
+        try:
+            # Substituir classificação existente
+            substituir_classificacao_questao(conn, questao['questao_id'], caminho_topicos)
+            sucessos += 1
+            if classificacao_completa:
+                classificacoes_completas += 1
+            else:
+                classificacoes_parciais += 1
+            print(f"[SUCESSO] Classificação substituída para a questão {questao['questao_id']}.")
+        except Exception as e:
+            print(f"[ERRO] Falha ao substituir classificação da questão {questao['questao_id']}: {str(e)}")
+            falhas += 1
+
+    print("\n[LOG] === RESUMO DO MODO 6 (Reclassificação por IDs) ===")
+    print(f"[LOG] Questões processadas: {len(questoes)}")
+    print(f"[LOG] Classificações substituídas: {sucessos}")
     print(f"[LOG]   - Completas: {classificacoes_completas}")
     print(f"[LOG]   - Parciais: {classificacoes_parciais}")
     print(f"[LOG] Falhas: {falhas}")
@@ -1164,34 +1282,23 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
     # Variável para controlar se é o primeiro tópico de nível 1
     is_first_level1 = (current_level == 1 and numbering == [1])
     
-    # Lógica de criação de seções baseada no número total de questões
-    # Se <= 500 questões: apenas tópicos de nível 1 têm quebras de página
-    # Se > 500 questões: tópicos de níveis 1, 2 e 3 têm quebras de página
+    # Sempre criar quebras de página para tópicos de níveis 1, 2 e 3
+    # (exceto o primeiro tópico de nível 1)
     needs_new_section = False
     
-    if total_questoes_banco <= 500:
-        # Para bancos pequenos (<= 500): apenas nível 1 com quebra de página
-        if current_level == 1 and not is_first_level1:
-            needs_new_section = True
-            print(f"[LOG] Banco pequeno ({total_questoes_banco} questões): quebra apenas nível 1")
-    else:
-        # Para bancos grandes (>= 500): níveis 1, 2 e 3 com quebra de página
-        if current_level == 1 and not is_first_level1:
-            # Criar nova seção para tópicos de nível 1 a partir do segundo
-            needs_new_section = True
-        elif current_level in [2, 3]:
-            # Sempre criar nova seção para tópicos de nível 2 e 3
-            needs_new_section = True
-            print(f"[LOG] Banco grande ({total_questoes_banco} questões): quebra níveis 1-3")
+    if current_level == 1 and not is_first_level1:
+        # Criar nova seção para tópicos de nível 1 a partir do segundo
+        needs_new_section = True
+    elif current_level in [2, 3]:
+        # Sempre criar nova seção para tópicos de nível 2 e 3
+        needs_new_section = True
     
     if needs_new_section:
         document.add_section(WD_SECTION.NEW_PAGE)
         print(f"[LOG] Nova seção criada para tópico nível {current_level}: {topic_tree['nome']}")
     
-    # Adiciona breadcrumb no cabeçalho baseado no número de questões
-    # Se <= 500: apenas nível 1 | Se >= 500: níveis 1, 2 e 3
-    max_breadcrumb_level = 1 if total_questoes_banco <= 500 else 3
-    if current_level <= max_breadcrumb_level:
+    # Adiciona breadcrumb no cabeçalho para níveis 1, 2 e 3
+    if current_level <= 3:
         section = document.sections[-1]
         section.header.is_linked_to_previous = False
         section.footer.is_linked_to_previous = True
@@ -1853,7 +1960,7 @@ def configurar_metadados_documento(document, total_questoes, nome_arquivo_limpo=
     print(f"  - Palavras-chave: {document.core_properties.keywords}")
     print(f"  - Data criação: {document.core_properties.created.strftime('%d/%m/%Y %H:%M')}")
 
-def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018):
+def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500):
     """
     Gera um banco de questões usando consulta SQL específica com N questões
     e organizando hierarquicamente com profundidade máxima de nível 4.
@@ -1863,14 +1970,12 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
         total_questoes: Número total de questões desejadas
         permitir_repeticao: Se permite questões repetidas
         ano_minimo: Ano mínimo para filtrar as questões (padrão: 2018)
+        tamanho_minimo_comentario: Tamanho mínimo do comentário em caracteres (padrão: 500)
     """
     print(f"[LOG] Gerando banco de questões com consulta SQL específica - {total_questoes} questões...")
     
-    # Informar comportamento de seções baseado no número de questões
-    if total_questoes <= 500:
-        print(f"[LOG] Banco COMPACTO ({total_questoes} questões): quebras de página apenas para tópicos de NÍVEL 1")
-    else:
-        print(f"[LOG] Banco EXPANDIDO ({total_questoes} questões): quebras de página para tópicos de NÍVEIS 1, 2 e 3")
+    # Informar comportamento de seções
+    print(f"[LOG] Quebras de página serão aplicadas para tópicos de NÍVEIS 1, 2 e 3")
     
     # Executar a consulta SQL fornecida para obter as questões selecionadas
     cursor = conn.cursor(dictionary=True)
@@ -1912,7 +2017,7 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
             c.qtd
         FROM questaoresidencia q
         JOIN cotas c ON q.area = c.area
-        WHERE (CHAR_LENGTH(q.comentario) >= 500 OR q.gabaritoIA=q.gabarito)
+        WHERE (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
          AND q.ano >= {ano_minimo}
     )
     SELECT 
@@ -2009,7 +2114,7 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
         diferenca = total_questoes - len(questoes_com_topico)
         print(f"[AVISO] Obtidas apenas {len(questoes_com_topico)} questões de {total_questoes} solicitadas.")
         print(f"[AVISO] Diferença: {diferenca} questões. Isso pode indicar que não há questões suficientes")
-        print(f"[AVISO] no banco que atendam aos critérios (comentário ≥500 chars, ano ≥2018, etc.)")
+        print(f"[AVISO] no banco que atendam aos critérios (comentário ≥{tamanho_minimo_comentario} chars, ano ≥{ano_minimo}, etc.)")
     
     # Mostrar distribuição final por área
     distribuicao_final = {}
@@ -2237,7 +2342,13 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     for tree in topic_trees:
         reorganize_questions_for_level4(tree, questions_by_topic, reorganized_questions)
     
+    # Verificar se todas as questões foram incluídas na reorganização
+    total_questoes_reorganizadas = sum(len(questoes) for questoes in reorganized_questions.values())
     print(f"[LOG] Questões reorganizadas para {len(reorganized_questions)} tópicos")
+    print(f"[LOG] Total de questões na reorganização: {total_questoes_reorganizadas}")
+    print(f"[LOG] Total de questões selecionadas: {len(questoes_com_topico)}")
+    if total_questoes_reorganizadas != len(questoes_com_topico):
+        print(f"[AVISO] Diferença detectada: {len(questoes_com_topico) - total_questoes_reorganizadas} questões podem não estar na hierarquia construída")
     
     # Criar documento
     document = Document()
@@ -2359,17 +2470,23 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     # Adicionar rodapé
     add_footer_with_text_and_page_number(document)
     
+    # Calcular número real de questões adicionadas ao documento
+    # questao_num começa em 1 e é incrementado para cada questão adicionada
+    # então o número real de questões é questao_num - 1
+    total_questoes_adicionadas = questao_num - 1
+    
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = f"banco_questoes_sql_{len(questoes_com_topico)}_{data_atual}.docx"
+    output_filename = f"banco_questoes_sql_{total_questoes_adicionadas}_{data_atual}.docx"
     
     document.save(output_filename)
     print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
-    print(f"[LOG] Total de questões no banco: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões selecionadas pela query: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões realmente adicionadas ao documento: {total_questoes_adicionadas}")
     
     return output_filename
 
-def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018):
+def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500):
     """
     Gera um banco de questões de um tópico específico (qualquer nível na hierarquia).
     
@@ -2379,6 +2496,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
         total_questoes: Número total de questões desejadas
         permitir_repeticao: Se permite questões repetidas
         ano_minimo: Ano mínimo para filtrar as questões (padrão: 2018)
+        tamanho_minimo_comentario: Tamanho mínimo do comentário em caracteres (padrão: 500)
     """
     print(f"[LOG] Gerando banco de questões para tópico específico - Tópico: {id_topico}, {total_questoes} questões...")
     
@@ -2396,11 +2514,8 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     nome_titulo_limpo = limpar_nome_para_titulo(nome_topico)
     print(f"[LOG] Tópico selecionado: {nome_topico}")
     
-    # Informar comportamento de seções baseado no número de questões
-    if total_questoes <= 500:
-        print(f"[LOG] Banco COMPACTO ({total_questoes} questões): quebras de página apenas para tópicos de NÍVEL 1")
-    else:
-        print(f"[LOG] Banco EXPANDIDO ({total_questoes} questões): quebras de página para tópicos de NÍVEIS 1, 2 e 3")
+    # Informar comportamento de seções
+    print(f"[LOG] Quebras de página serão aplicadas para tópicos de NÍVEIS 1, 2 e 3")
     
     # Buscar questões diretamente associadas ao tópico especificado
     # Incluir questões do tópico e de todos os seus descendentes
@@ -2437,16 +2552,13 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     
     query_questoes = f"""
     SELECT DISTINCT
-        q.*,
-        ROW_NUMBER() OVER (
-            ORDER BY SHA2(CONCAT(q.questao_id, 'SEMENTE_FIXA'), 256)
-        ) AS ordem
+        q.*
     FROM questaoresidencia q
     INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
     WHERE cq.id_topico IN ({format_strings})
-      AND (CHAR_LENGTH(q.comentario) >= 500 OR q.gabaritoIA=q.gabarito)
+      AND (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
       AND q.ano >= {ano_minimo}
-    ORDER BY ordem
+    ORDER BY SHA2(CONCAT(q.questao_id, 'SEMENTE_FIXA'), 256)
     LIMIT %s
     """
     
@@ -2517,7 +2629,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
         diferenca = total_questoes - len(questoes_com_topico)
         print(f"[AVISO] Obtidas apenas {len(questoes_com_topico)} questões de {total_questoes} solicitadas.")
         print(f"[AVISO] Diferença: {diferenca} questões. Isso pode indicar que não há questões suficientes")
-        print(f"[AVISO] no tópico que atendam aos critérios (comentário ≥500 chars, ano ≥2018, etc.)")
+        print(f"[AVISO] no tópico que atendam aos critérios (comentário ≥{tamanho_minimo_comentario} chars, ano ≥{ano_minimo}, etc.)")
     
     # Mostrar distribuição final por área (informativo)
     distribuicao_final = {}
@@ -2671,7 +2783,85 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     reorganized_questions = {}
     reorganize_questions_for_level4(topic_tree, questions_by_topic, reorganized_questions)
     
+    # Verificar se todas as questões foram incluídas na reorganização
+    total_questoes_reorganizadas = sum(len(questoes) for questoes in reorganized_questions.values())
     print(f"[LOG] Questões reorganizadas para {len(reorganized_questions)} tópicos")
+    print(f"[LOG] Total de questões na reorganização: {total_questoes_reorganizadas}")
+    print(f"[LOG] Total de questões selecionadas: {len(questoes_com_topico)}")
+    
+    # Verificar questões que não foram incluídas na reorganização
+    topicos_com_questoes = set(questions_by_topic.keys())
+    topicos_reorganizados = set(reorganized_questions.keys())
+    topicos_nao_reorganizados = topicos_com_questoes - topicos_reorganizados
+    
+    if topicos_nao_reorganizados:
+        questoes_perdidas = sum(len(questions_by_topic[tid]) for tid in topicos_nao_reorganizados)
+        print(f"[AVISO] {len(topicos_nao_reorganizados)} tópicos com questões não foram incluídos na reorganização")
+        print(f"[AVISO] {questoes_perdidas} questões podem estar sendo perdidas")
+        print(f"[AVISO] Tópicos não reorganizados: {sorted(topicos_nao_reorganizados)}")
+        
+        # Tentar incluir questões de tópicos não reorganizados
+        # Se o tópico não está na árvore, adicionar diretamente ao tópico raiz ou ao tópico pai mais próximo
+        for tid_nao_reorg in topicos_nao_reorganizados:
+            if tid_nao_reorg in topicos_info:
+                # Tentar encontrar o tópico pai mais próximo que está na árvore
+                topico_atual = topicos_info[tid_nao_reorg]
+                topico_pai_id = topico_atual.get('id_pai')
+                
+                # Se o tópico pai está na árvore, adicionar questões lá
+                # Caso contrário, adicionar ao tópico raiz
+                if topico_pai_id and topico_pai_id in topicos_completos:
+                    # Buscar o tópico pai na árvore
+                    def find_node_in_tree(tree, target_id):
+                        if tree['id'] == target_id:
+                            return tree
+                        for child in tree.get('children', []):
+                            result = find_node_in_tree(child, target_id)
+                            if result:
+                                return result
+                        return None
+                    
+                    node_pai = find_node_in_tree(topic_tree, topico_pai_id)
+                    if node_pai:
+                        # Adicionar questões ao tópico pai
+                        if node_pai['id'] not in reorganized_questions:
+                            reorganized_questions[node_pai['id']] = []
+                        reorganized_questions[node_pai['id']].extend(questions_by_topic[tid_nao_reorg])
+                        print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico pai {topico_pai_id}")
+                    else:
+                        # Distribuir questões do tópico raiz para o primeiro filho disponível
+                        # (já que o modo 2 não processa o tópico raiz diretamente)
+                        if topic_tree.get('children'):
+                            primeiro_filho_id = topic_tree['children'][0]['id']
+                            if primeiro_filho_id not in reorganized_questions:
+                                reorganized_questions[primeiro_filho_id] = []
+                            reorganized_questions[primeiro_filho_id].extend(questions_by_topic[tid_nao_reorg])
+                            print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao primeiro filho {primeiro_filho_id} (tópico raiz não processado no modo 2)")
+                        else:
+                            # Se não há filhos, adicionar ao tópico raiz (será processado no fallback)
+                            if topic_tree['id'] not in reorganized_questions:
+                                reorganized_questions[topic_tree['id']] = []
+                            reorganized_questions[topic_tree['id']].extend(questions_by_topic[tid_nao_reorg])
+                            print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico raiz {topic_tree['id']} (sem filhos)")
+                else:
+                    # Distribuir questões do tópico raiz para o primeiro filho disponível
+                    if topic_tree.get('children'):
+                        primeiro_filho_id = topic_tree['children'][0]['id']
+                        if primeiro_filho_id not in reorganized_questions:
+                            reorganized_questions[primeiro_filho_id] = []
+                        reorganized_questions[primeiro_filho_id].extend(questions_by_topic[tid_nao_reorg])
+                        print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao primeiro filho {primeiro_filho_id} (tópico raiz não processado no modo 2)")
+                    else:
+                        # Se não há filhos, adicionar ao tópico raiz (será processado no fallback)
+                        if topic_tree['id'] not in reorganized_questions:
+                            reorganized_questions[topic_tree['id']] = []
+                        reorganized_questions[topic_tree['id']].extend(questions_by_topic[tid_nao_reorg])
+                        print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico raiz {topic_tree['id']} (sem filhos)")
+    
+    # Recalcular total após correção
+    total_questoes_reorganizadas = sum(len(questoes) for questoes in reorganized_questions.values())
+    if total_questoes_reorganizadas != len(questoes_com_topico):
+        print(f"[AVISO] Após correção, ainda há diferença: {len(questoes_com_topico) - total_questoes_reorganizadas} questões")
     
     # Criar documento
     document = Document()
@@ -2804,18 +2994,24 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     # Adicionar rodapé
     add_footer_with_text_and_page_number(document)
     
+    # Calcular número real de questões adicionadas ao documento
+    # questao_num começa em 1 e é incrementado para cada questão adicionada
+    # então o número real de questões é questao_num - 1
+    total_questoes_adicionadas = questao_num - 1
+    
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
     nome_arquivo_limpo = nome_titulo_limpo.replace(" ", "_")
-    output_filename = f"banco_questoes_{nome_arquivo_limpo}_{len(questoes_com_topico)}_{data_atual}.docx"
+    output_filename = f"banco_questoes_{nome_arquivo_limpo}_{total_questoes_adicionadas}_{data_atual}.docx"
     
     document.save(output_filename)
     print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
-    print(f"[LOG] Total de questões no banco: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões selecionadas pela query: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões realmente adicionadas ao documento: {total_questoes_adicionadas}")
     
     return output_filename
 
-def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016):
+def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016, tamanho_minimo_comentario=500):
     """
     Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada).
     Recupera todas as questões que atendam aos critérios, sem cotas por área.
@@ -2825,9 +3021,11 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
         instituicao: 'REVALIDA NACIONAL' ou 'ENARE'
         permitir_repeticao: Se permite questões repetidas
         ano_minimo: Ano mínimo para filtrar as questões (padrão: 2016)
+        tamanho_minimo_comentario: Tamanho mínimo do comentário em caracteres (padrão: 500)
     """
     print(f"[LOG] Gerando banco de questões para {instituicao}...")
-    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= {ano_minimo}, comentário >= 400 caracteres")
+    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= {ano_minimo}")
+    print(f"[LOG] Regra de comentários: comentário humano >= {tamanho_minimo_comentario} caracteres OU (IA acertou E tem comentarioIA)")
     print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
     
     cursor = conn.cursor(dictionary=True)
@@ -2837,7 +3035,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
     SELECT 
         q.*
     FROM questaoresidencia q
-    WHERE (CHAR_LENGTH(comentario)>400 or (CHAR_LENGTH(comentarioIA)>400 and gabaritoIA=gabarito))
+    WHERE (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
       AND q.ano >= {ano_minimo}
       AND q.instituicao LIKE '%{instituicao}%'
     ORDER BY q.ano DESC, q.questao_id
@@ -3140,7 +3338,13 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
     for tree in topic_trees:
         reorganize_questions_for_level4(tree, questions_by_topic, reorganized_questions)
     
+    # Verificar se todas as questões foram incluídas na reorganização
+    total_questoes_reorganizadas = sum(len(questoes) for questoes in reorganized_questions.values())
     print(f"[LOG] Questões reorganizadas para {len(reorganized_questions)} tópicos")
+    print(f"[LOG] Total de questões na reorganização: {total_questoes_reorganizadas}")
+    print(f"[LOG] Total de questões selecionadas: {len(questoes_com_topico)}")
+    if total_questoes_reorganizadas != len(questoes_com_topico):
+        print(f"[AVISO] Diferença detectada: {len(questoes_com_topico) - total_questoes_reorganizadas} questões podem não estar na hierarquia construída")
     
     # Criar documento
     document = Document()
@@ -3253,14 +3457,20 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
     # Adicionar rodapé
     add_footer_with_text_and_page_number(document)
     
+    # Calcular número real de questões adicionadas ao documento
+    # questao_num começa em 1 e é incrementado para cada questão adicionada
+    # então o número real de questões é questao_num - 1
+    total_questoes_adicionadas = questao_num - 1
+    
     # Salvar documento
     data_atual = datetime.now().strftime("%Y%m%d_%H%M%S")
     nome_arquivo_limpo = nome_titulo_instituicao.replace(" ", "_")
-    output_filename = f"banco_questoes_{nome_arquivo_limpo}_{len(questoes_com_topico)}_{data_atual}.docx"
+    output_filename = f"banco_questoes_{nome_arquivo_limpo}_{total_questoes_adicionadas}_{data_atual}.docx"
     
     document.save(output_filename)
     print(f"[LOG] Arquivo {output_filename} gerado com sucesso.")
-    print(f"[LOG] Total de questões no banco: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões selecionadas pela query: {len(questoes_com_topico)}")
+    print(f"[LOG] Questões realmente adicionadas ao documento: {total_questoes_adicionadas}")
     
     return output_filename
 
@@ -3309,6 +3519,22 @@ if __name__ == "__main__":
             print("Erro: O ano deve ser um número inteiro!")
             exit(1)
     
+    # Solicitar tamanho mínimo de comentário para modos 1, 2 e 3
+    tamanho_minimo_comentario = 500
+    if modo in [1, 2, 3]:
+        try:
+            tamanho_input = input("Tamanho mínimo do comentário em caracteres (padrão 500, Enter para usar padrão): ").strip()
+            if tamanho_input:
+                tamanho_minimo_comentario = int(tamanho_input)
+                if tamanho_minimo_comentario < 0:
+                    print("Erro: O tamanho mínimo deve ser um número positivo!")
+                    exit(1)
+            else:
+                tamanho_minimo_comentario = 500
+        except ValueError:
+            print("Erro: O tamanho mínimo deve ser um número inteiro!")
+            exit(1)
+    
     # Configurar permitir repetição (fixo como False para evitar questões duplicadas)
     permitir_repeticao = False
     
@@ -3328,9 +3554,10 @@ if __name__ == "__main__":
         print(f"  6. Medicina Preventiva: {round(N * 0.2)} questões (20%)")
         print()
         print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
+        print(f"[LOG] Tamanho mínimo de comentário: {tamanho_minimo_comentario} caracteres")
         print()
         
-        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
+        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
         
     elif modo == 2:
         # MODO 2: Banco de tópico específico (qualquer nível)
@@ -3359,10 +3586,11 @@ if __name__ == "__main__":
         
         print(f"[LOG] Tópico selecionado: {id_topico}")
         print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
+        print(f"[LOG] Tamanho mínimo de comentário: {tamanho_minimo_comentario} caracteres")
         print(f"[LOG] Gerando {N} questões do tópico e seus descendentes...")
         print()
         
-        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
+        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3401,11 +3629,13 @@ if __name__ == "__main__":
         
         print(f"[LOG] Instituição selecionada: {instituicao_input}")
         print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
-        print(f"[LOG] Filtros aplicados: ano >= {ano_minimo}, comentário >= 400 caracteres")
+        print(f"[LOG] Tamanho mínimo de comentário: {tamanho_minimo_comentario} caracteres")
+        print(f"[LOG] Filtros aplicados: ano >= {ano_minimo}")
+        print(f"[LOG] Regra de comentários: comentário humano >= {tamanho_minimo_comentario} caracteres OU (IA acertou E tem comentarioIA)")
         print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
         print()
         
-        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo)
+        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3582,71 +3812,118 @@ if __name__ == "__main__":
             exit(1)
     
     elif modo == 6:
-        # MODO 6: Classificar questões sem tópico
-        print(f"\n[LOG] MODO 6: Classificando questões sem tópico")
+        # MODO 6: Classificar questões sem tópico ou reclassificar questões específicas
+        print(f"\n[LOG] MODO 6: Classificação de questões")
         print(f"[LOG] Usando API DeepSeek para navegação hierárquica de tópicos")
         print()
-
-        limite = 20
-        limite_input = input("Informe o número máximo de questões a classificar (padrão 20, digite 0 para todas): ").strip()
-        if limite_input:
+        
+        # Perguntar se o usuário quer classificar questões específicas por lista de IDs
+        opcao = input("Deseja classificar questões específicas por lista de IDs? (s/n, padrão n): ").strip().lower()
+        
+        if opcao in ['s', 'sim', 'y', 'yes']:
+            # Modo: Reclassificar questões específicas por lista de IDs
+            print("\n[LOG] Modo: Reclassificar questões específicas por lista de IDs")
+            ids_input = input("Informe a lista de questao_id separados por vírgula (ex: 123,456,789): ").strip()
+            
+            if not ids_input:
+                print("[ERRO] Nenhum ID foi informado!")
+                conn.close()
+                exit(1)
+            
+            # Processar lista de IDs
             try:
-                limite_val = int(limite_input)
-                if limite_val < 0:
-                    print("Erro: o número deve ser maior ou igual a zero!")
+                questao_ids = []
+                ids_list = [id_str.strip() for id_str in ids_input.split(',')]
+                for id_str in ids_list:
+                    if id_str:
+                        questao_id = int(id_str)
+                        if questao_id <= 0:
+                            print(f"[ERRO] ID inválido: {id_str}. IDs devem ser números positivos!")
+                            conn.close()
+                            exit(1)
+                        questao_ids.append(questao_id)
+                
+                if not questao_ids:
+                    print("[ERRO] Nenhum ID válido foi informado!")
                     conn.close()
                     exit(1)
-                limite = None if limite_val == 0 else limite_val
-            except ValueError:
-                print("Erro: informe um número inteiro válido!")
+                
+                print(f"[LOG] Processando {len(questao_ids)} questões específicas")
+                processar_classificacao_questoes_por_ids(conn, questao_ids)
+                
+            except ValueError as e:
+                print(f"[ERRO] Erro ao processar lista de IDs: {str(e)}")
+                print("[ERRO] Certifique-se de informar apenas números inteiros separados por vírgula!")
+                conn.close()
+                exit(1)
+            except Exception as e:
+                print(f"[ERRO] Erro inesperado: {str(e)}")
                 conn.close()
                 exit(1)
         else:
+            # Modo original: Classificar questões sem tópico
+            print("\n[LOG] Modo: Classificar questões sem tópico")
+            
             limite = 20
-
-        filtro_instituicao = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
-        if not filtro_instituicao:
-            filtro_instituicao = None
-
-        resto_mod5 = None
-        resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
-        if resto_input:
-            try:
-                resto_val = int(resto_input)
-                if resto_val not in [0, 1, 2, 3, 4]:
-                    print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
+            limite_input = input("Informe o número máximo de questões a classificar (padrão 20, digite 0 para todas): ").strip()
+            if limite_input:
+                try:
+                    limite_val = int(limite_input)
+                    if limite_val < 0:
+                        print("Erro: o número deve ser maior ou igual a zero!")
+                        conn.close()
+                        exit(1)
+                    limite = None if limite_val == 0 else limite_val
+                except ValueError:
+                    print("Erro: informe um número inteiro válido!")
                     conn.close()
                     exit(1)
-                resto_mod5 = resto_val
-            except ValueError:
-                print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
-                conn.close()
-                exit(1)
+            else:
+                limite = 20
 
-        print(f"[LOG] Limite: {'todas' if limite is None else limite}")
-        if filtro_instituicao:
-            print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
-        if resto_mod5 is not None:
-            print(f"[LOG] Filtro questao_id %% 5 = {resto_mod5}")
-        filtro_ano = None
-        ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
-        if ano_input:
-            try:
-                ano_val = int(ano_input)
-                filtro_ano = ano_val
-                print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
-            except ValueError:
-                print("Erro: ano deve ser um número inteiro válido!")
-                conn.close()
-                exit(1)
+            filtro_instituicao = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
+            if not filtro_instituicao:
+                filtro_instituicao = None
 
-        processar_classificacao_questoes_sem_topico(
-            conn,
-            limite=limite,
-            filtro_instituicao=filtro_instituicao,
-            resto_mod5=resto_mod5,
-            filtro_ano=filtro_ano
-        )
+            resto_mod5 = None
+            resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
+            if resto_input:
+                try:
+                    resto_val = int(resto_input)
+                    if resto_val not in [0, 1, 2, 3, 4]:
+                        print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
+                        conn.close()
+                        exit(1)
+                    resto_mod5 = resto_val
+                except ValueError:
+                    print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
+                    conn.close()
+                    exit(1)
+
+            print(f"[LOG] Limite: {'todas' if limite is None else limite}")
+            if filtro_instituicao:
+                print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
+            if resto_mod5 is not None:
+                print(f"[LOG] Filtro questao_id %% 5 = {resto_mod5}")
+            filtro_ano = None
+            ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
+            if ano_input:
+                try:
+                    ano_val = int(ano_input)
+                    filtro_ano = ano_val
+                    print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+                except ValueError:
+                    print("Erro: ano deve ser um número inteiro válido!")
+                    conn.close()
+                    exit(1)
+
+            processar_classificacao_questoes_sem_topico(
+                conn,
+                limite=limite,
+                filtro_instituicao=filtro_instituicao,
+                resto_mod5=resto_mod5,
+                filtro_ano=filtro_ano
+            )
     
     conn.close()
     print("\n[LOG] Processo concluído!")
