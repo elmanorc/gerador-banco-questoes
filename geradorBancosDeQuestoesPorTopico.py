@@ -1233,7 +1233,7 @@ def get_breadcrumb(topic_tree, numbering, parent_names=None):
         breadcrumb_parts.append(f"{sub_numbering}. {name}")
     return ' > '.join(breadcrumb_parts)
 
-def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level=1, numbering=None, parent_names=None, questao_num=1, breadcrumb_raiz=None, permitir_repeticao=True, questoes_adicionadas=None, total_questoes_banco=1000):
+def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level=1, numbering=None, parent_names=None, questao_num=1, breadcrumb_raiz=None, permitir_repeticao=True, questoes_adicionadas=None, total_questoes_banco=1000, incluir_comentarios=True):
     print(f"[LOG] Adicionando seção para tópico: {topic_tree['nome']} (ID: {topic_tree['id']})")
     
     # Usar o nível da árvore se disponível, senão usar o parâmetro level
@@ -1261,7 +1261,8 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
                 breadcrumb_raiz=breadcrumb_raiz,
                 permitir_repeticao=permitir_repeticao,
                 questoes_adicionadas=questoes_adicionadas,
-                total_questoes_banco=total_questoes_banco
+                total_questoes_banco=total_questoes_banco,
+                incluir_comentarios=incluir_comentarios
             )
         return questao_num
     
@@ -1376,28 +1377,30 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
             if alt_text:
                 safe_text = clean_xml_illegal_chars(f"{alt}) {alt_text}")
                 document.add_paragraph(safe_text)
-        document.add_paragraph("")
-        p = document.add_paragraph()
-        run = p.add_run("------  COMENTÁRIO  ------")
-        run.bold = True
-        run.font.color.rgb = RGBColor(0x1E, 0x90, 0xFF)
-        p = document.add_paragraph()
-        gabarito_texto_limpo = clean_xml_illegal_chars(q['gabarito_texto'])
-        run = p.add_run(f"Gabarito: {q['gabarito']} - {gabarito_texto_limpo}")
-        run.bold = True
+        # Adicionar comentário apenas se incluir_comentarios for True
+        if incluir_comentarios:
+            document.add_paragraph("")
+            p = document.add_paragraph()
+            run = p.add_run("------  COMENTÁRIO  ------")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0x1E, 0x90, 0xFF)
+            p = document.add_paragraph()
+            gabarito_texto_limpo = clean_xml_illegal_chars(q['gabarito_texto'])
+            run = p.add_run(f"Gabarito: {q['gabarito']} - {gabarito_texto_limpo}")
+            run.bold = True
 
-        if q.get('gabaritoIA') == q.get('gabarito'):
-            add_comentario_with_images(
-                document,
-                q['comentarioIA'],
-                q['codigo'],
-                r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
-                usar_src_absoluto=True
-            )
-        else:
-            add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
-                usar_src_absoluto=True)
-        document.add_paragraph("")  # Espaço
+            if q.get('gabaritoIA') == q.get('gabarito'):
+                add_comentario_with_images(
+                    document,
+                    q['comentarioIA'],
+                    q['codigo'],
+                    r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                    usar_src_absoluto=True
+                )
+            else:
+                add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                    usar_src_absoluto=True)
+            document.add_paragraph("")  # Espaço
         questao_num += 1
     
     # Adiciona filhos recursivamente
@@ -1414,7 +1417,8 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
             breadcrumb_raiz=breadcrumb_raiz,
             permitir_repeticao=permitir_repeticao,
             questoes_adicionadas=questoes_adicionadas,
-            total_questoes_banco=total_questoes_banco
+            total_questoes_banco=total_questoes_banco,
+            incluir_comentarios=incluir_comentarios
         )
     
     return questao_num
@@ -1960,7 +1964,7 @@ def configurar_metadados_documento(document, total_questoes, nome_arquivo_limpo=
     print(f"  - Palavras-chave: {document.core_properties.keywords}")
     print(f"  - Data criação: {document.core_properties.created.strftime('%d/%m/%Y %H:%M')}")
 
-def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500):
+def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500, incluir_comentarios=True):
     """
     Gera um banco de questões usando consulta SQL específica com N questões
     e organizando hierarquicamente com profundidade máxima de nível 4.
@@ -2464,7 +2468,8 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
             breadcrumb_raiz=None,  # Não usar breadcrumb_raiz, usar lógica específica
             permitir_repeticao=permitir_repeticao,
             questoes_adicionadas=questoes_adicionadas,
-            total_questoes_banco=total_questoes
+            total_questoes_banco=total_questoes,
+            incluir_comentarios=incluir_comentarios
         )
     
     # Adicionar rodapé
@@ -2486,7 +2491,7 @@ def gerar_banco_estratificacao_deterministica(conn, total_questoes=1000, permiti
     
     return output_filename
 
-def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500):
+def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_repeticao=True, ano_minimo=2018, tamanho_minimo_comentario=500, incluir_comentarios=True):
     """
     Gera um banco de questões de um tópico específico (qualquer nível na hierarquia).
     
@@ -2972,7 +2977,8 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
                 breadcrumb_raiz=None,
                 permitir_repeticao=permitir_repeticao,
                 questoes_adicionadas=questoes_adicionadas,
-                total_questoes_banco=len(questoes_com_topico)
+                total_questoes_banco=len(questoes_com_topico),
+                incluir_comentarios=incluir_comentarios
             )
     else:
         # Se não há filhos, processar o próprio tópico raiz (fallback)
@@ -2988,7 +2994,8 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
             breadcrumb_raiz=None,
             permitir_repeticao=permitir_repeticao,
             questoes_adicionadas=questoes_adicionadas,
-            total_questoes_banco=len(questoes_com_topico)
+            total_questoes_banco=len(questoes_com_topico),
+            incluir_comentarios=incluir_comentarios
         )
     
     # Adicionar rodapé
@@ -3011,7 +3018,7 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     
     return output_filename
 
-def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016, tamanho_minimo_comentario=500):
+def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016, tamanho_minimo_comentario=500, incluir_comentarios=True):
     """
     Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada).
     Recupera todas as questões que atendam aos critérios, sem cotas por área.
@@ -3451,7 +3458,8 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
             breadcrumb_raiz=None,
             permitir_repeticao=permitir_repeticao,
             questoes_adicionadas=questoes_adicionadas,
-            total_questoes_banco=len(questoes_com_topico)
+            total_questoes_banco=len(questoes_com_topico),
+            incluir_comentarios=incluir_comentarios
         )
     
     # Adicionar rodapé
@@ -3557,7 +3565,19 @@ if __name__ == "__main__":
         print(f"[LOG] Tamanho mínimo de comentário: {tamanho_minimo_comentario} caracteres")
         print()
         
-        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
+        # Perguntar se deve incluir comentários
+        print("Opções de geração do documento:")
+        print("1) Apenas questões (sem comentários)")
+        print("2) Questões com comentários (padrão)")
+        opcao_comentarios = input("Escolha a opção (1 ou 2, padrão 2): ").strip()
+        incluir_comentarios = opcao_comentarios != '1'
+        if incluir_comentarios:
+            print("[LOG] Documento será gerado com questões e comentários")
+        else:
+            print("[LOG] Documento será gerado apenas com questões (sem comentários)")
+        print()
+        
+        gerar_banco_estratificacao_deterministica(conn, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario, incluir_comentarios=incluir_comentarios)
         
     elif modo == 2:
         # MODO 2: Banco de tópico específico (qualquer nível)
@@ -3590,7 +3610,19 @@ if __name__ == "__main__":
         print(f"[LOG] Gerando {N} questões do tópico e seus descendentes...")
         print()
         
-        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
+        # Perguntar se deve incluir comentários
+        print("Opções de geração do documento:")
+        print("1) Apenas questões (sem comentários)")
+        print("2) Questões com comentários (padrão)")
+        opcao_comentarios = input("Escolha a opção (1 ou 2, padrão 2): ").strip()
+        incluir_comentarios = opcao_comentarios != '1'
+        if incluir_comentarios:
+            print("[LOG] Documento será gerado com questões e comentários")
+        else:
+            print("[LOG] Documento será gerado apenas com questões (sem comentários)")
+        print()
+        
+        resultado = gerar_banco_area_especifica(conn, id_topico, N, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario, incluir_comentarios=incluir_comentarios)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3635,7 +3667,19 @@ if __name__ == "__main__":
         print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
         print()
         
-        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario)
+        # Perguntar se deve incluir comentários
+        print("Opções de geração do documento:")
+        print("1) Apenas questões (sem comentários)")
+        print("2) Questões com comentários (padrão)")
+        opcao_comentarios = input("Escolha a opção (1 ou 2, padrão 2): ").strip()
+        incluir_comentarios = opcao_comentarios != '1'
+        if incluir_comentarios:
+            print("[LOG] Documento será gerado com questões e comentários")
+        else:
+            print("[LOG] Documento será gerado apenas com questões (sem comentários)")
+        print()
+        
+        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario, incluir_comentarios=incluir_comentarios)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
