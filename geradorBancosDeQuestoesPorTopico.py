@@ -1229,8 +1229,13 @@ def get_breadcrumb(topic_tree, numbering, parent_names=None):
         parent_names = []
     breadcrumb_parts = []
     for i, (num, name) in enumerate(zip(numbering, parent_names + [topic_tree['nome']])):
-        sub_numbering = '.'.join(str(n) for n in numbering[:i+1])
-        breadcrumb_parts.append(f"{sub_numbering}. {name}")
+        if i >= 3:
+            break
+        if i == 2:
+            breadcrumb_parts.append(f"{name}")
+        else:
+            sub_numbering = '.'.join(str(n) for n in numbering[:i+1])
+            breadcrumb_parts.append(f"{sub_numbering}. {name}")
     return ' > '.join(breadcrumb_parts)
 
 def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level=1, numbering=None, parent_names=None, questao_num=1, breadcrumb_raiz=None, permitir_repeticao=True, questoes_adicionadas=None, total_questoes_banco=1000, incluir_comentarios=True):
@@ -1313,8 +1318,8 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         # Construir lista com numerações e nomes dos ancestrais + tópico atual
         all_names = parent_names + [topic_tree['nome']]
         
-        for i, name in enumerate(all_names):
-            # Criar numeração parcial (ex: "1", "1.2", "1.2.3")
+        for i, name in enumerate(all_names[:3]):
+            # Criar numeração para os níveis 1 a 3
             partial_numbering = '.'.join(str(n) for n in numbering[:i+1])
             breadcrumb_parts.append(f"{partial_numbering}. {name}")
         
@@ -1371,7 +1376,7 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         enunciado_texto = extrair_texto_sem_imagens(q['enunciado'])
         p.add_run(clean_xml_illegal_chars(enunciado_texto))
         # Adiciona as imagens do enunciado (abaixo do texto)
-        add_imagens_enunciado(document, q['enunciado'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia")
+        add_imagens_enunciado(document, q['enunciado'], q['codigo'], r"C:\Users\elman\GoogleDrive\QuestoesMED\imagens\QuestoesResidencia")
         for alt in ['A', 'B', 'C', 'D', 'E']:
             alt_text = q.get(f'alternativa{alt}')
             if alt_text:
@@ -1394,11 +1399,11 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
                     document,
                     q['comentarioIA'],
                     q['codigo'],
-                    r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                    r"C:\Users\elman\GoogleDrive\QuestoesMED\imagens\QuestoesResidencia_comentarios",
                     usar_src_absoluto=True
                 )
             else:
-                add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\OneDrive\Imagens\QuestoesResidencia_comentarios",
+                add_comentario_with_images(document, q['comentario'], q['codigo'], r"C:\Users\elman\GoogleDrive\QuestoesMED\imagens\QuestoesResidencia_comentarios",
                     usar_src_absoluto=True)
             document.add_paragraph("")  # Espaço
         questao_num += 1
@@ -2831,7 +2836,11 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
                         # Adicionar questões ao tópico pai
                         if node_pai['id'] not in reorganized_questions:
                             reorganized_questions[node_pai['id']] = []
-                        reorganized_questions[node_pai['id']].extend(questions_by_topic[tid_nao_reorg])
+                        _existing_ids = {q['questao_id'] for q in reorganized_questions[node_pai['id']]}
+                        for _q in questions_by_topic[tid_nao_reorg]:
+                            if _q['questao_id'] not in _existing_ids:
+                                reorganized_questions[node_pai['id']].append(_q)
+                                _existing_ids.add(_q['questao_id'])
                         print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico pai {topico_pai_id}")
                     else:
                         # Distribuir questões do tópico raiz para o primeiro filho disponível
@@ -2840,13 +2849,21 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
                             primeiro_filho_id = topic_tree['children'][0]['id']
                             if primeiro_filho_id not in reorganized_questions:
                                 reorganized_questions[primeiro_filho_id] = []
-                            reorganized_questions[primeiro_filho_id].extend(questions_by_topic[tid_nao_reorg])
+                            _existing_ids = {q['questao_id'] for q in reorganized_questions[primeiro_filho_id]}
+                            for _q in questions_by_topic[tid_nao_reorg]:
+                                if _q['questao_id'] not in _existing_ids:
+                                    reorganized_questions[primeiro_filho_id].append(_q)
+                                    _existing_ids.add(_q['questao_id'])
                             print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao primeiro filho {primeiro_filho_id} (tópico raiz não processado no modo 2)")
                         else:
                             # Se não há filhos, adicionar ao tópico raiz (será processado no fallback)
                             if topic_tree['id'] not in reorganized_questions:
                                 reorganized_questions[topic_tree['id']] = []
-                            reorganized_questions[topic_tree['id']].extend(questions_by_topic[tid_nao_reorg])
+                            _existing_ids = {q['questao_id'] for q in reorganized_questions[topic_tree['id']]}
+                            for _q in questions_by_topic[tid_nao_reorg]:
+                                if _q['questao_id'] not in _existing_ids:
+                                    reorganized_questions[topic_tree['id']].append(_q)
+                                    _existing_ids.add(_q['questao_id'])
                             print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico raiz {topic_tree['id']} (sem filhos)")
                 else:
                     # Distribuir questões do tópico raiz para o primeiro filho disponível
@@ -2854,13 +2871,21 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
                         primeiro_filho_id = topic_tree['children'][0]['id']
                         if primeiro_filho_id not in reorganized_questions:
                             reorganized_questions[primeiro_filho_id] = []
-                        reorganized_questions[primeiro_filho_id].extend(questions_by_topic[tid_nao_reorg])
+                        _existing_ids = {q['questao_id'] for q in reorganized_questions[primeiro_filho_id]}
+                        for _q in questions_by_topic[tid_nao_reorg]:
+                            if _q['questao_id'] not in _existing_ids:
+                                reorganized_questions[primeiro_filho_id].append(_q)
+                                _existing_ids.add(_q['questao_id'])
                         print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao primeiro filho {primeiro_filho_id} (tópico raiz não processado no modo 2)")
                     else:
                         # Se não há filhos, adicionar ao tópico raiz (será processado no fallback)
                         if topic_tree['id'] not in reorganized_questions:
                             reorganized_questions[topic_tree['id']] = []
-                        reorganized_questions[topic_tree['id']].extend(questions_by_topic[tid_nao_reorg])
+                        _existing_ids = {q['questao_id'] for q in reorganized_questions[topic_tree['id']]}
+                        for _q in questions_by_topic[tid_nao_reorg]:
+                            if _q['questao_id'] not in _existing_ids:
+                                reorganized_questions[topic_tree['id']].append(_q)
+                                _existing_ids.add(_q['questao_id'])
                         print(f"[LOG] Questões do tópico {tid_nao_reorg} adicionadas ao tópico raiz {topic_tree['id']} (sem filhos)")
     
     # Recalcular total após correção
@@ -3037,18 +3062,45 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
     
     cursor = conn.cursor(dictionary=True)
     
-    # Consulta SQL simplificada - sem cotas por área
-    query_questoes = f"""
-    SELECT 
-        q.*
-    FROM questaoresidencia q
-    WHERE (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
-      AND q.ano >= {ano_minimo}
-      AND q.instituicao LIKE '%{instituicao}%'
-    ORDER BY q.ano DESC, q.questao_id
-    """
-    
-    print(f"[LOG] Executando consulta SQL simplificada para selecionar questões de {instituicao}...")
+    print(f"\n[OPÇÕES DE CONSULTA - {instituicao}]")
+    print("1) Manter essa consulta geral (busca todas as questões correspondentes)")
+    print("2) Consultar aleatoriamente 70 questões")
+    opcao_consulta = input("Escolha a opção (1 ou 2) [Padrão: 1]: ").strip()
+    if opcao_consulta == '2':
+        # Consulta SQL simplificada - 70 questões aleatórias
+        query_questoes = f"""
+        SELECT *
+        FROM (
+            SELECT q.*
+            FROM questaoresidencia q
+            JOIN (
+                SELECT FLOOR(RAND() * (SELECT MAX(questao_id) FROM questaoresidencia)) AS rand_id
+            ) r
+            WHERE q.questao_id >= r.rand_id
+              AND (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario}
+                   OR (q.gabaritoIA = q.gabarito AND q.comentarioIA IS NOT NULL))
+              AND q.ano >= {ano_minimo}
+              AND q.instituicao LIKE '%{instituicao}%'
+            LIMIT 200
+        ) t
+        ORDER BY RAND()
+        LIMIT 70
+        """
+        print(f"[LOG] Executando consulta SQL aleatória de 70 questões de {instituicao}...")
+    else:
+        # Consulta SQL geral - busca todas as questões correspondentes sem limite
+        query_questoes = f"""
+        SELECT 
+            q.*
+        FROM questaoresidencia q
+        WHERE (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
+          AND q.ano >= {ano_minimo}
+          AND q.instituicao LIKE '%{instituicao}%'
+        ORDER BY q.ano DESC, q.questao_id
+        """
+        print(f"[LOG] Executando consulta SQL geral para selecionar questões de {instituicao}...")
+
+
     cursor.execute(query_questoes)
     questoes_selecionadas = cursor.fetchall()
     
