@@ -1296,8 +1296,11 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
         # Criar nova seção para tópicos de nível 1 a partir do segundo
         needs_new_section = True
     elif current_level in [2, 3]:
-        # Sempre criar nova seção para tópicos de nível 2 e 3
-        needs_new_section = True
+        # Para tópicos de nível 2 e 3, evitar quebra de página se for o primeiro filho,
+        # para que o conteúdo (subtópico) apareça logo em seguida na mesma página do pai.
+        is_first_child = (numbering[-1] == 1)
+        if not is_first_child:
+            needs_new_section = True
     
     if needs_new_section:
         document.add_section(WD_SECTION.NEW_PAGE)
@@ -1440,7 +1443,7 @@ def add_footer_with_text_and_page_number(document):
         # Primeiro parágrafo: texto centralizado
         p_center = footer.add_paragraph()
         p_center.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-        p_center.add_run("Questões MED - 2025")
+        p_center.add_run("Questões MED - 2026")
         # Segundo parágrafo: numeração de página à direita
         p_right = footer.add_paragraph()
         p_right.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
