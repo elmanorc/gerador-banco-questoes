@@ -21,11 +21,30 @@ from PIL import Image
 import requests
 import json
 
+def load_db_password():
+    """
+    Carrega a senha do banco do arquivo db_password.txt.
+    """
+    password_path = os.path.join(os.path.dirname(__file__), 'db_password.txt')
+    try:
+        with open(password_path, 'r', encoding='utf-8') as f:
+            pwd = f.read().strip()
+            if not pwd:
+                raise ValueError("Senha está vazia no arquivo db_password.txt")
+            return pwd
+    except FileNotFoundError:
+        print(f"[ERRO] Arquivo db_password.txt não encontrado em {password_path}")
+        print("[ERRO] Crie o arquivo db_password.txt na raiz do projeto com a senha do banco")
+        raise
+    except Exception as e:
+        print(f"[ERRO] Erro ao ler db_password.txt: {str(e)}")
+        raise
+
 # Configurações do banco
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "El@mysql.32",
+    "password": load_db_password(),
     "database": "qconcursos"
 }
 

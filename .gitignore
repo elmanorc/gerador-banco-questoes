@@ -15,3 +15,6 @@ api_key.txt
 
 # Imagens Mermaid temporárias (não versionar)
 temp_mermaid/
+# Senha do banco de dados (n�o versionar)
+db_password.txt
+
