@@ -347,10 +347,10 @@ def carregar_hierarquia_topicos(conn):
     print(f"[LOG] Hierarquia carregada: {len(topicos_dict)} tópicos, {len(topicos_raiz)} raízes.")
     return topicos_dict, topicos_raiz
 
-def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
+def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_prova=None):
     """
     Recupera questões que ainda não possuem registros em classificacao_questao.
-    Permite filtrar por instituição e por resto de divisão por 5.
+    Permite filtrar por instituição, ano, prova e por resto de divisão por 5.
     """
     print("[LOG] Buscando questões sem classificação...")
     cursor = conn.cursor(dictionary=True)
@@ -375,8 +375,12 @@ def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None
         params.append(resto_mod5)
 
     if filtro_ano is not None:
-        query += " AND q.ano >= %s"
+        query += " AND q.ano = %s"
         params.append(filtro_ano)
+
+    if filtro_prova is not None:
+        query += " AND q.prova LIKE %s"
+        params.append(f"%{filtro_prova}%")
 
     query += " ORDER BY q.questao_id"
 
@@ -433,7 +437,7 @@ def classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz_ids):
             break
 
         prompt_base = (
-            "Classifique a questão abaixo em um dos tópicos listados a seguir. "
+            "Classifique a questão de prova de medicina abaixo em um dos tópicos listados a seguir. "
             "Informe APENAS o número correspondente ao tópico que melhor define o assunto da questão.\n\n"
             f"[ENUNCIADO]: {enunciado_limpo}\n\n"
             f"[GABARITO]: {gabarito_composto}\n\n"
@@ -629,7 +633,7 @@ def obter_classificacao_questao(conn, questao_id, topicos_dict):
     finally:
         cursor.close()
 
-def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None):
+def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_prova=None):
     """
     Processa questões sem classificação hierárquica utilizando a API DeepSeek.
     """
@@ -643,7 +647,8 @@ def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instit
         limite=limite,
         filtro_instituicao=filtro_instituicao,
         resto_mod5=resto_mod5,
-        filtro_ano=filtro_ano
+        filtro_ano=filtro_ano,
+        filtro_prova=filtro_prova
     )
 
     if not questoes:
@@ -890,7 +895,7 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
         conn.rollback()
 
-def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_topico=None):
+def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_topico=None, filtro_prova=None):
     """
     Processa questões usando a API DeepSeek.
     Atualiza as colunas gabaritoIA e comentarioIA.
@@ -900,7 +905,8 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
     - Limite de questões (limite)
     - Instituição (filtro_instituicao)
     - Resto módulo 5 (resto_mod5)
-    - Ano mínimo (filtro_ano)
+    - Ano (filtro_ano)
+    - Prova (filtro_prova)
     - Tópico (filtro_topico) - inclui questões do tópico e todos os seus descendentes
     
     Se questao_ids for fornecido, será combinado com os outros filtros.
@@ -994,13 +1000,21 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
             query += " AND MOD(questao_id, 5) = %s"
         params.append(resto_mod5)
     
-    # Filtrar por ano mínimo
+    # Filtrar por ano específico
     if filtro_ano is not None:
         if ids_topicos_filtro:
-            query += " AND q.ano >= %s"
+            query += " AND q.ano = %s"
         else:
-            query += " AND ano >= %s"
+            query += " AND ano = %s"
         params.append(filtro_ano)
+        
+    # Filtrar por prova
+    if filtro_prova is not None:
+        if ids_topicos_filtro:
+            query += " AND q.prova LIKE %s"
+        else:
+            query += " AND prova LIKE %s"
+        params.append(f"%{filtro_prova}%")
     
     # Filtrar por tópico (incluindo descendentes)
     if ids_topicos_filtro:
@@ -3046,26 +3060,32 @@ def gerar_banco_area_especifica(conn, id_topico, total_questoes=1000, permitir_r
     
     return output_filename
 
-def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_minimo=2016, tamanho_minimo_comentario=500, incluir_comentarios=True):
+def gerar_banco_por_instituicao(conn, instituicao=None, prova=None, permitir_repeticao=True, ano_minimo=2016, tamanho_minimo_comentario=500, incluir_comentarios=True):
     """
-    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada).
+    Gera um banco de questões baseado na instituição (REVALIDA NACIONAL, ENARE ou outra informada) OU prova específica.
     Recupera todas as questões que atendam aos critérios, sem cotas por área.
     
     Args:
         conn: Conexão com o banco de dados
-        instituicao: 'REVALIDA NACIONAL' ou 'ENARE'
+        instituicao: 'REVALIDA NACIONAL', 'ENARE' ou outra informada
+        prova: 'ENAMED' ou outra informada
         permitir_repeticao: Se permite questões repetidas
         ano_minimo: Ano mínimo para filtrar as questões (padrão: 2016)
         tamanho_minimo_comentario: Tamanho mínimo do comentário em caracteres (padrão: 500)
     """
-    print(f"[LOG] Gerando banco de questões para {instituicao}...")
-    print(f"[LOG] Filtros: instituição LIKE '%{instituicao}%', ano >= {ano_minimo}")
+    nome_busca = instituicao if instituicao else prova
+    
+    print(f"[LOG] Gerando banco de questões para {nome_busca}...")
+    print(f"[LOG] Filtros: instituição ou prova, ano >= {ano_minimo}")
     print(f"[LOG] Regra de comentários: comentário humano >= {tamanho_minimo_comentario} caracteres OU (IA acertou E tem comentarioIA)")
     print(f"[LOG] SEM COTAS POR ÁREA - Recuperando todas as questões que atendam aos critérios")
     
     cursor = conn.cursor(dictionary=True)
     
-    print(f"\n[OPÇÕES DE CONSULTA - {instituicao}]")
+    where_instituicao = f"AND q.instituicao LIKE '%{instituicao}%'" if instituicao else ""
+    where_prova = f"AND q.prova LIKE '%{prova}%'" if prova else ""
+    
+    print(f"\n[OPÇÕES DE CONSULTA - {nome_busca}]")
     print("1) Manter essa consulta geral (busca todas as questões correspondentes)")
     print("2) Consultar aleatoriamente 70 questões")
     opcao_consulta = input("Escolha a opção (1 ou 2) [Padrão: 1]: ").strip()
@@ -3083,13 +3103,14 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
               AND (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario}
                    OR (q.gabaritoIA = q.gabarito AND q.comentarioIA IS NOT NULL))
               AND q.ano >= {ano_minimo}
-              AND q.instituicao LIKE '%{instituicao}%'
+              {where_instituicao}
+              {where_prova}
             LIMIT 200
         ) t
         ORDER BY RAND()
         LIMIT 70
         """
-        print(f"[LOG] Executando consulta SQL aleatória de 70 questões de {instituicao}...")
+        print(f"[LOG] Executando consulta SQL aleatória de 70 questões de {nome_busca}...")
     else:
         # Consulta SQL geral - busca todas as questões correspondentes sem limite
         query_questoes = f"""
@@ -3098,10 +3119,11 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
         FROM questaoresidencia q
         WHERE (CHAR_LENGTH(q.comentario) >= {tamanho_minimo_comentario} OR (q.gabaritoIA=q.gabarito AND q.comentarioIA IS NOT NULL))
           AND q.ano >= {ano_minimo}
-          AND q.instituicao LIKE '%{instituicao}%'
+          {where_instituicao}
+          {where_prova}
         ORDER BY q.ano DESC, q.questao_id
         """
-        print(f"[LOG] Executando consulta SQL geral para selecionar questões de {instituicao}...")
+        print(f"[LOG] Executando consulta SQL geral para selecionar questões de {nome_busca}...")
 
 
     cursor.execute(query_questoes)
@@ -3110,7 +3132,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
     print(f"[LOG] Total de questões selecionadas: {len(questoes_selecionadas)}")
     
     if len(questoes_selecionadas) == 0:
-        print(f"[ERRO] Nenhuma questão encontrada para {instituicao} com os critérios especificados")
+        print(f"[ERRO] Nenhuma questão encontrada para {nome_busca} com os critérios especificados")
         return None
     
     # Mostrar distribuição por área das questões selecionadas (apenas informativo)
@@ -3119,7 +3141,7 @@ def gerar_banco_por_instituicao(conn, instituicao, permitir_repeticao=True, ano_
         area = q['area']
         distribuicao_selecionadas[area] = distribuicao_selecionadas.get(area, 0) + 1
     
-    print(f"[LOG] Distribuição por área das questões selecionadas de {instituicao}:")
+    print(f"[LOG] Distribuição por área das questões selecionadas de {nome_busca}:")
     for area, count in distribuicao_selecionadas.items():
         print(f"  - {area}: {count} questões")
     
@@ -3685,36 +3707,47 @@ if __name__ == "__main__":
             exit(1)
     
     elif modo == 3:
-        # MODO 3: Banco por instituição (REVALIDA/ENARE)
-        print(f"\n[LOG] MODO 3: Gerando banco por instituição")
+        # MODO 3: Banco por instituição ou prova
+        print(f"\n[LOG] MODO 3: Gerando banco por instituição ou prova específica")
         print()
-        print("Instituições disponíveis:")
+        print("Opções disponíveis:")
         print("1:  REVALIDA NACIONAL - Revalidação de diplomas médicos obtidos no exterior")
-        print("2:  ENARE - Exame Nacional de Revalidação de Diplomas Médicos Expedidos por Instituições de Educação Superior Estrangeiras")
+        print("2:  ENARE - Exame Nacional de Revalidação de Diplomas Médicos Expedidos por Instituições")
         print("3:  Outro - Informar o nome da instituição desejada")
+        print("4:  Prova Específica (ex: ENAMED)")
         print()
         
         while True:
             try:
-                opcao_instituicao = int(input("Digite o número da instituição (1, 2 ou 3): "))
-                if opcao_instituicao in [1, 2, 3]:
+                opcao_instituicao = int(input("Digite o número correspondente (1, 2, 3 ou 4): "))
+                if opcao_instituicao in [1, 2, 3, 4]:
                     break
-                print("Erro: Opção inválida! Digite 1, 2 ou 3.")
+                print("Erro: Opção inválida! Digite 1, 2, 3 ou 4.")
             except ValueError:
-                print("Erro: Digite um número válido (1, 2 ou 3)!")
+                print("Erro: Digite um número válido (1, 2, 3 ou 4)!")
+        
+        instituicao_input = None
+        prova_input = None
         
         if opcao_instituicao == 1:
             instituicao_input = 'REVALIDA NACIONAL'
         elif opcao_instituicao == 2:
             instituicao_input = 'ENARE'
-        else:
+        elif opcao_instituicao == 3:
             instituicao_input = ""
             while not instituicao_input:
                 instituicao_input = input("Digite o nome da instituição desejada: ").strip()
                 if not instituicao_input:
                     print("Erro: O nome da instituição não pode ser vazio!")
+        elif opcao_instituicao == 4:
+            prova_input = ""
+            while not prova_input:
+                prova_input = input("Digite o nome da prova desejada (ex: ENAMED): ").strip()
+                if not prova_input:
+                    print("Erro: O nome da prova não pode ser vazio!")
         
-        print(f"[LOG] Instituição selecionada: {instituicao_input}")
+        nome_busca = instituicao_input if instituicao_input else prova_input
+        print(f"[LOG] Seleção: {nome_busca}")
         print(f"[LOG] Ano mínimo selecionado: {ano_minimo}")
         print(f"[LOG] Tamanho mínimo de comentário: {tamanho_minimo_comentario} caracteres")
         print(f"[LOG] Filtros aplicados: ano >= {ano_minimo}")
@@ -3734,7 +3767,7 @@ if __name__ == "__main__":
             print("[LOG] Documento será gerado apenas com questões (sem comentários)")
         print()
         
-        resultado = gerar_banco_por_instituicao(conn, instituicao_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario, incluir_comentarios=incluir_comentarios)
+        resultado = gerar_banco_por_instituicao(conn, instituicao_input, prova_input, permitir_repeticao=permitir_repeticao, ano_minimo=ano_minimo, tamanho_minimo_comentario=tamanho_minimo_comentario, incluir_comentarios=incluir_comentarios)
         
         if not resultado:
             print("[ERRO] Falha na geração do banco de questões!")
@@ -3823,6 +3856,12 @@ if __name__ == "__main__":
         instituicao_input = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
         if instituicao_input:
             filtro_instituicao = instituicao_input
+            
+        # Solicitar filtro de prova (opcional)
+        filtro_prova = None
+        prova_input = input("Deseja filtrar por prova? (Ex: ENAMED, pressione Enter para não filtrar): ").strip()
+        if prova_input:
+            filtro_prova = prova_input
         
         # Solicitar resto módulo 5 (opcional)
         resto_mod5 = None
@@ -3840,9 +3879,9 @@ if __name__ == "__main__":
                 conn.close()
                 exit(1)
         
-        # Solicitar filtro de ano mínimo (opcional)
+        # Solicitar filtro de ano específico (opcional)
         filtro_ano = None
-        ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
+        ano_input = input("Deseja filtrar pelo ano específico da prova? (Ex: 2025, Enter para todos): ").strip()
         if ano_input:
             try:
                 ano_val = int(ano_input)
@@ -3881,7 +3920,7 @@ if __name__ == "__main__":
                 exit(1)
         
         # Validar se pelo menos um critério foi fornecido
-        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None:
+        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None and filtro_prova is None:
             print("[ERRO] Nenhum critério de busca fornecido! Forneça IDs ou pelo menos um filtro.")
             conn.close()
             exit(1)
@@ -3893,10 +3932,12 @@ if __name__ == "__main__":
             print(f"[LOG] Limite: {limite}")
         if filtro_instituicao:
             print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
+        if filtro_prova:
+            print(f"[LOG] Filtro de prova: {filtro_prova}")
         if resto_mod5 is not None:
             print(f"[LOG] Filtro questao_id % 5 = {resto_mod5}")
         if filtro_ano is not None:
-            print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+            print(f"[LOG] Filtro ano: {filtro_ano}")
         if filtro_topico is not None:
             print(f"[LOG] Filtro tópico: {filtro_topico} (incluindo descendentes)")
             print(f"[LOG] Buscando apenas questões sem comentários (comentario IS NULL AND comentarioIA IS NULL)")
@@ -3904,7 +3945,7 @@ if __name__ == "__main__":
         try:
             processar_questoes_por_id(conn, questao_ids=questao_ids, limite=limite, 
                                      filtro_instituicao=filtro_instituicao, 
-                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano, filtro_topico=filtro_topico)
+                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano, filtro_topico=filtro_topico, filtro_prova=filtro_prova)
         except Exception as e:
             print(f"[ERRO] Erro ao processar questões: {str(e)}")
             conn.close()
@@ -3984,6 +4025,10 @@ if __name__ == "__main__":
             if not filtro_instituicao:
                 filtro_instituicao = None
 
+            filtro_prova = input("Deseja filtrar por prova? (Ex: ENAMED, pressione Enter para não filtrar): ").strip()
+            if not filtro_prova:
+                filtro_prova = None
+
             resto_mod5 = None
             resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
             if resto_input:
@@ -4002,15 +4047,17 @@ if __name__ == "__main__":
             print(f"[LOG] Limite: {'todas' if limite is None else limite}")
             if filtro_instituicao:
                 print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
+            if filtro_prova:
+                print(f"[LOG] Filtro de prova: {filtro_prova}")
             if resto_mod5 is not None:
                 print(f"[LOG] Filtro questao_id %% 5 = {resto_mod5}")
             filtro_ano = None
-            ano_input = input("Deseja filtrar por ano mínimo da prova? (Ex: 2018, Enter para todos): ").strip()
+            ano_input = input("Deseja filtrar pelo ano específico da prova? (Ex: 2025, Enter para todos): ").strip()
             if ano_input:
                 try:
                     ano_val = int(ano_input)
                     filtro_ano = ano_val
-                    print(f"[LOG] Filtro ano mínimo: {filtro_ano}")
+                    print(f"[LOG] Filtro ano: {filtro_ano}")
                 except ValueError:
                     print("Erro: ano deve ser um número inteiro válido!")
                     conn.close()
@@ -4021,7 +4068,8 @@ if __name__ == "__main__":
                 limite=limite,
                 filtro_instituicao=filtro_instituicao,
                 resto_mod5=resto_mod5,
-                filtro_ano=filtro_ano
+                filtro_ano=filtro_ano,
+                filtro_prova=filtro_prova
             )
     
     conn.close()
