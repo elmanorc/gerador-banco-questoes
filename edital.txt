@@ -1,0 +1,29 @@
+1. Saúde coletiva
+2. Atenção Primária à Saúde
+3.1 Obstetrícia: pré-natal de risco habitual
+3.2 Obstetrícia: puerpério
+3.3 Obstetrícia: planejamento reprodutivo
+3.4 Ginecologia: rastreamento do câncer do colo do útero 
+3.5 Ginecologia: rastreamento do câncer de mama
+4.1 Pediatria: puericultura
+4.2 Pediatria: aleitamento materno
+4.3 Pediatria: alimentação saudável
+4.4 Pediatria: vigilância do crescimento e desenvolvimento
+4.5 Pediatria: doenças prevalentes da infância
+5. Geriatria
+6.1 hipertensão arterial sistêmica
+6.2 diabetes mellitus
+6.3 dislipidemias e risco cardiovascular global
+6.4 asma
+6.5 DPOC
+6.6 depressão
+6.7 ansiedade
+6.8 Rede de Atenção Psicossocial
+7.1 tuberculose
+7.2 hanseníase
+7.3 dengue
+7.4 chikungunya
+7.5 Zika 
+7.6 Influenza
+7.7 Infecções sexualmente transmissíveis
+7.8 Imunizações/Vacinação
