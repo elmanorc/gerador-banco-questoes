@@ -175,9 +175,27 @@ def verificar_e_adicionar_imagem(document, img_path, max_width=None):
         return True
         
     except UnrecognizedImageError as e:
-        print(f"[ERRO] Formato de imagem não reconhecido: {img_path}")
-        print(f"[ERRO] Detalhes: {str(e)}")
-        return False
+        print(f"[AVISO] Formato de imagem não reconhecido inicialmente: {img_path}. Tentando converter com PIL...")
+        try:
+            with Image.open(img_path) as img:
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                # Sobrescreve a imagem original com o formato corrigido
+                img.save(img_path, format='JPEG')
+            
+            # Tentar adicionar a imagem novamente
+            if width_to_use:
+                document.add_picture(img_path, width=width_to_use)
+            else:
+                document.add_picture(img_path)
+            
+            print(f"[LOG] Imagem convertida e adicionada com sucesso: {img_path}")
+            return True
+        except Exception as fix_error:
+            print(f"[ERRO] Falha ao tentar converter e adicionar imagem: {img_path}")
+            print(f"[ERRO] Detalhes originais: {str(e)}")
+            print(f"[ERRO] Detalhes da conversão: {str(fix_error)}")
+            return False
     except Exception as e:
         print(f"[ERRO] Erro ao adicionar imagem {img_path}: {str(e)}")
         return False
@@ -366,10 +384,10 @@ def carregar_hierarquia_topicos(conn):
     print(f"[LOG] Hierarquia carregada: {len(topicos_dict)} tópicos, {len(topicos_raiz)} raízes.")
     return topicos_dict, topicos_raiz
 
-def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_prova=None):
+def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None, resto_id_mod5=None, filtro_ano=None, filtro_prova=None, filtro_ano_maior_igual=None, filtro_codigo_menor=None, questao_ids=None):
     """
     Recupera questões que ainda não possuem registros em classificacao_questao.
-    Permite filtrar por instituição, ano, prova e por resto de divisão por 5.
+    Permite filtrar por instituição, ano, prova, lista de IDs e por resto de divisão do ID da questão por 10.
     """
     print("[LOG] Buscando questões sem classificação...")
     cursor = conn.cursor(dictionary=True)
@@ -380,22 +398,37 @@ def buscar_questoes_sem_classificacao(conn, limite=None, filtro_instituicao=None
     WHERE NOT EXISTS (
         SELECT 1
         FROM classificacao_questao cq
+        JOIN topico t ON cq.id_topico = t.id
         WHERE cq.id_questao = q.questao_id
+          AND t.id_pai IS NOT NULL
     )
     """
     params = []
+
+    if questao_ids:
+        format_strings = ','.join(['%s'] * len(questao_ids))
+        query += f" AND q.questao_id IN ({format_strings})"
+        params.extend(questao_ids)
 
     if filtro_instituicao:
         query += " AND q.instituicao LIKE %s"
         params.append(f"%{filtro_instituicao}%")
 
-    if resto_mod5 is not None:
-        query += " AND MOD(q.questao_id, 5) = %s"
-        params.append(resto_mod5)
+    if resto_id_mod5 is not None:
+        query += " AND MOD(q.questao_id, 10) = %s"
+        params.append(resto_id_mod5)
 
     if filtro_ano is not None:
         query += " AND q.ano = %s"
         params.append(filtro_ano)
+
+    if filtro_ano_maior_igual is not None:
+        query += " AND q.ano >= %s"
+        params.append(filtro_ano_maior_igual)
+
+    if filtro_codigo_menor is not None:
+        query += " AND q.codigo < %s"
+        params.append(filtro_codigo_menor)
 
     if filtro_prova is not None:
         query += " AND q.prova LIKE %s"
@@ -455,19 +488,35 @@ def classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz_ids):
             classificacao_completa = False
             break
 
-        prompt_base = (
-            "Classifique a questão de prova de medicina abaixo em um dos tópicos listados a seguir. "
-            "Informe APENAS o número correspondente ao tópico que melhor define o assunto da questão.\n\n"
-            f"[ENUNCIADO]: {enunciado_limpo}\n\n"
-            f"[GABARITO]: {gabarito_composto}\n\n"
-            f"[TÓPICOS NÍVEL {nivel}]:\n{lista_opcoes}\n"
-        )
+        if nivel > 1:
+            prompt_base = (
+                "Classifique a questão de prova de medicina abaixo em um dos tópicos listados a seguir.\n"
+                "Analise a questão e determine a qual subtópico ela pertence mais especificamente.\n"
+                "Se a questão for muito ampla, genérica ou se encaixar em múltiplos subtópicos sem um vencedor claro, responda com 0 para mantê-la no tópico pai.\n\n"
+                f"[ENUNCIADO]: {enunciado_limpo}\n\n"
+                f"[GABARITO]: {gabarito_composto}\n\n"
+                f"[TÓPICOS NÍVEL {nivel}]:\n{lista_opcoes}\n\n"
+                "Informe APENAS o número correspondente ao tópico (ou 0)."
+            )
+        else:
+            prompt_base = (
+                "Classifique a questão de prova de medicina abaixo em um dos tópicos listados a seguir. "
+                "Informe APENAS o número correspondente ao tópico que melhor define o assunto da questão.\n\n"
+                f"[ENUNCIADO]: {enunciado_limpo}\n\n"
+                f"[GABARITO]: {gabarito_composto}\n\n"
+                f"[TÓPICOS NÍVEL {nivel}]:\n{lista_opcoes}\n"
+            )
 
         numero_escolhido = None
         for tentativa in range(2):
+            if nivel > 1:
+                opcoes_validas = f"0, {', '.join(str(i) for i in mapa_indice.keys())}"
+            else:
+                opcoes_validas = f"{', '.join(str(i) for i in mapa_indice.keys())}"
+                
             prompt = prompt_base if tentativa == 0 else (
                 prompt_base +
-                f"\nResponda apenas com um número da lista acima. Opções válidas: {', '.join(str(i) for i in mapa_indice.keys())}."
+                f"\nResponda apenas com um número da lista acima. Opções válidas: {opcoes_validas}."
             )
 
             resposta = deepseek_chat(
@@ -482,11 +531,19 @@ def classificar_questao_hierarquica(questao, topicos_dict, topicos_raiz_ids):
                 break
 
             numero = extrair_primeiro_inteiro(resposta)
+            if numero == 0 and nivel > 1:
+                numero_escolhido = 0
+                break
             if numero in mapa_indice:
                 numero_escolhido = numero
                 break
 
             print(f"[AVISO] Resposta inválida para seleção de tópico: '{resposta}'. Tentativa {tentativa + 1}/2.")
+
+        if numero_escolhido == 0:
+            print(f"[LOG] IA escolheu manter a questão no tópico pai (retornou 0). Classificação encerrada no nível {nivel - 1}.")
+            classificacao_completa = False
+            break
 
         if numero_escolhido is None:
             if caminho_topicos:
@@ -740,7 +797,7 @@ def mapear_assunto_hierarquicamente(assunto_edital, topicos_dict, topicos_raiz_i
 
     return caminho_topicos, mapeamento_completo
 
-def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_prova=None):
+def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instituicao=None, resto_id_mod5=None, filtro_ano=None, filtro_prova=None, filtro_ano_maior_igual=None, filtro_codigo_menor=None, questao_ids=None):
     """
     Processa questões sem classificação hierárquica utilizando a API DeepSeek.
     """
@@ -753,9 +810,12 @@ def processar_classificacao_questoes_sem_topico(conn, limite=None, filtro_instit
         conn,
         limite=limite,
         filtro_instituicao=filtro_instituicao,
-        resto_mod5=resto_mod5,
+        resto_id_mod5=resto_id_mod5,
         filtro_ano=filtro_ano,
-        filtro_prova=filtro_prova
+        filtro_prova=filtro_prova,
+        filtro_ano_maior_igual=filtro_ano_maior_igual,
+        filtro_codigo_menor=filtro_codigo_menor,
+        questao_ids=questao_ids
     )
 
     if not questoes:
@@ -1002,25 +1062,14 @@ def processar_questoes_incompletas(conn, instituicao, resto_mod5=0):
         print(f"[ERRO] Falha ao fazer commit: {str(e)}")
         conn.rollback()
 
-def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instituicao=None, resto_mod5=None, filtro_ano=None, filtro_topico=None, filtro_prova=None):
+def processar_questoes_por_id(conn, resto_id_mod3=None, filtro_ano_maior_igual=None, codigo_minimo=None):
     """
     Processa questões usando a API DeepSeek.
     Atualiza as colunas gabaritoIA e comentarioIA.
     
-    Pode filtrar por:
-    - Lista de IDs de questões (questao_ids)
-    - Limite de questões (limite)
-    - Instituição (filtro_instituicao)
-    - Resto módulo 5 (resto_mod5)
-    - Ano (filtro_ano)
-    - Prova (filtro_prova)
-    - Tópico (filtro_topico) - inclui questões do tópico e todos os seus descendentes
-    
-    Se questao_ids for fornecido, será combinado com os outros filtros.
-    Se questao_ids não for fornecido, usará apenas os outros filtros.
-    
-    Quando filtro_topico é fornecido, busca apenas questões sem comentários
-    (comentario IS NULL AND comentarioIA IS NULL).
+    Filtra por:
+    - Ano maior ou igual (filtro_ano_maior_igual)
+    - Resto módulo 10 do ID da questão (resto_id_mod5)
     """
     print("[LOG] === MODO 5: Processando questões ===")
     
@@ -1028,124 +1077,50 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
     horario_inicial = datetime.now()
     horario_inicial_str = horario_inicial.strftime('%Y-%m-%d %H:%M:%S')
     
-    # Verificar se pelo menos um critério foi fornecido
-    if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None:
-        print("[ERRO] Nenhum critério de busca fornecido. Forneça IDs ou pelo menos um filtro.")
-        return
-    
     cursor = conn.cursor(dictionary=True)
     
-    # Se filtro_topico for fornecido, obter todos os descendentes do tópico
-    ids_topicos_filtro = None
-    if filtro_topico is not None:
-        print(f"[LOG] Buscando questões do tópico {filtro_topico} e seus descendentes...")
-        cursor.execute("""
-            WITH RECURSIVE topico_descendentes AS (
-                SELECT id, nome, 1 as nivel
-                FROM topico 
-                WHERE id = %s
-                
-                UNION ALL
-                
-                SELECT t.id, t.nome, td.nivel + 1
-                FROM topico t
-                INNER JOIN topico_descendentes td ON t.id_pai = td.id
-                WHERE td.nivel < 10
-            )
-            SELECT id FROM topico_descendentes
-        """, (filtro_topico,))
-        
-        descendentes = cursor.fetchall()
-        ids_topicos_filtro = [d['id'] for d in descendentes]
-        print(f"[LOG] Tópico {filtro_topico} tem {len(ids_topicos_filtro)} descendentes (incluindo ele próprio)")
-        
-        if not ids_topicos_filtro:
-            print(f"[ERRO] Não foi possível obter descendentes do tópico {filtro_topico}")
-            return
-    
-    # Construir query dinamicamente
-    # Se houver filtro por tópico, precisamos fazer JOIN com classificacao_questao
-    if ids_topicos_filtro:
-        query = """
-        SELECT DISTINCT q.questao_id, q.codigo, q.enunciado, q.alternativaA, q.alternativaB, q.alternativaC, 
-               q.alternativaD, q.alternativaE, q.gabarito, q.comentario
-        FROM questaoresidencia q
-        INNER JOIN classificacao_questao cq ON q.questao_id = cq.id_questao
-        WHERE 1=1
-        """
-    else:
-        query = """
-        SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
-               alternativaD, alternativaE, gabarito, comentario
-        FROM questaoresidencia 
-        WHERE 1=1
-        """
+    query = """
+    SELECT questao_id, codigo, enunciado, alternativaA, alternativaB, alternativaC, 
+           alternativaD, alternativaE, gabarito, comentario
+    FROM questaoresidencia 
+    WHERE 1=1
+    """
     params = []
     
-    # Filtrar por IDs se fornecido
-    if questao_ids:
-        format_strings = ','.join(['%s'] * len(questao_ids))
-        if ids_topicos_filtro:
-            query += f" AND q.questao_id IN ({format_strings})"
-        else:
-            query += f" AND questao_id IN ({format_strings})"
-        params.extend(questao_ids)
+    # Considerar apenas questões de múltipla escolha (excluir Certo/Errado onde apenas A e B existem)
+    # Permite questões com alternativaA vazia (como provas recém-importadas com alternativas embutidas no enunciado)
+    query += " AND ( (alternativaC IS NOT NULL AND alternativaC != '') OR (alternativaA IS NULL OR alternativaA = '') )"
+    print("[LOG] Filtro aplicado: apenas questões de múltipla escolha (ou sem alternativas separadas)")
     
-    # Filtrar por instituição
-    if filtro_instituicao:
-        if ids_topicos_filtro:
-            query += " AND q.instituicao LIKE %s"
-        else:
-            query += " AND instituicao LIKE %s"
-        params.append(f"%{filtro_instituicao}%")
-    
-    # Filtrar por resto módulo 5
-    if resto_mod5 is not None:
-        if ids_topicos_filtro:
-            query += " AND MOD(q.questao_id, 5) = %s"
-        else:
-            query += " AND MOD(questao_id, 5) = %s"
-        params.append(resto_mod5)
-    
-    # Filtrar por ano específico
-    if filtro_ano is not None:
-        if ids_topicos_filtro:
-            query += " AND q.ano = %s"
-        else:
-            query += " AND ano = %s"
-        params.append(filtro_ano)
+    if resto_id_mod3 is not None:
+        query += " AND MOD(questao_id, 3) = %s"
+        params.append(resto_id_mod3)
         
-    # Filtrar por prova
-    if filtro_prova is not None:
-        if ids_topicos_filtro:
-            query += " AND q.prova LIKE %s"
-        else:
-            query += " AND prova LIKE %s"
-        params.append(f"%{filtro_prova}%")
+    if codigo_minimo is not None:
+        query += " AND codigo >= %s"
+        params.append(codigo_minimo)
     
-    # Filtrar por tópico (incluindo descendentes)
-    if ids_topicos_filtro:
-        format_strings = ','.join(['%s'] * len(ids_topicos_filtro))
-        query += f" AND cq.id_topico IN ({format_strings})"
-        params.extend(ids_topicos_filtro)
-        # Quando há filtro por tópico, buscar apenas questões sem comentários
-        query += " AND q.comentario IS NULL AND q.comentarioIA IS NULL"
-        print("[LOG] Filtro aplicado: apenas questões sem comentários (comentario IS NULL AND comentarioIA IS NULL)")
+    if filtro_ano_maior_igual is not None:
+        query += " AND ano >= %s"
+        params.append(filtro_ano_maior_igual)
     
-    # Filtrar questões já respondidas corretamente (apenas se IDs não foram fornecidos e não há filtro por tópico)
-    if not questao_ids and not ids_topicos_filtro:
-        query += " AND NOT (gabaritoIA = gabarito AND comentarioIA IS NOT NULL)"
-        print("[LOG] Filtro aplicado: excluindo questões já respondidas corretamente pela IA")
+    query += " AND comentario IS NULL AND comentarioIA IS NULL"
+    print("[LOG] Filtro aplicado: apenas questões sem comentários (comentario IS NULL e comentarioIA IS NULL)")
     
-    if ids_topicos_filtro:
-        query += " ORDER BY q.questao_id"
-    else:
-        query += " ORDER BY questao_id"
+    autor_atual = "DeepSeek AI"
+    query += """ 
+    AND (
+        comentario_autor IS NULL OR 
+        comentario_autor != %s OR 
+        comentario_data IS NULL OR 
+        comentario_data < DATE_SUB(NOW(), INTERVAL 1 MONTH) OR 
+        gabaritoIA = gabarito
+    )
+    """
+    params.append(autor_atual)
+    print(f"[LOG] Filtro aplicado: excluindo questões que a IA '{autor_atual}' errou há menos de 1 mês")
     
-    # Aplicar limite se fornecido
-    if limite and limite > 0:
-        query += " LIMIT %s"
-        params.append(limite)
+    query += " ORDER BY questao_id"
     
     cursor.execute(query, tuple(params))
     questoes = cursor.fetchall()
@@ -1155,14 +1130,6 @@ def processar_questoes_por_id(conn, questao_ids=None, limite=None, filtro_instit
         return
     
     print(f"[LOG] Encontradas {len(questoes)} questão(ões) no banco de dados")
-    
-    # Verificar se há IDs que não foram encontrados (apenas se IDs foram fornecidos)
-    ids_nao_encontrados = []
-    if questao_ids:
-        ids_encontrados = {q['questao_id'] for q in questoes}
-        ids_nao_encontrados = [id_q for id_q in questao_ids if id_q not in ids_encontrados]
-        if ids_nao_encontrados:
-            print(f"[AVISO] Os seguintes IDs não foram encontrados: {ids_nao_encontrados}")
     
     cursor.close()
     
@@ -1518,7 +1485,9 @@ def add_topic_sections_recursive(document, topic_tree, questions_by_topic, level
             run = p.add_run(f"Gabarito: {q['gabarito']} - {gabarito_texto_limpo}")
             run.bold = True
 
-            if q.get('gabaritoIA') == q.get('gabarito'):
+            gabarito_ia = str(q.get('gabaritoIA') or '').upper().strip()
+            gabarito_real = str(q.get('gabarito') or '').upper().strip()
+            if gabarito_ia == gabarito_real and gabarito_ia != '':
                 add_comentario_with_images(
                     document,
                     q['comentarioIA'],
@@ -1602,7 +1571,8 @@ def render_mermaid_to_image(mermaid_code, temp_dir):
     Retorna o caminho da imagem gerada ou None se falhar.
     """
     import hashlib
-    import base64
+    import subprocess
+    import tempfile
     
     try:
         # Criar hash do código Mermaid para usar como nome do arquivo
@@ -1614,33 +1584,54 @@ def render_mermaid_to_image(mermaid_code, temp_dir):
             print(f"[LOG] Imagem Mermaid já existe: {output_path}")
             return output_path
         
-        # Codificar o código Mermaid em base64 para a API
-        mermaid_encoded = base64.urlsafe_b64encode(mermaid_code.encode('utf-8')).decode('ascii')
+        # Garantir que o diretório temporário existe
+        os.makedirs(temp_dir, exist_ok=True)
         
-        # URL da API do Mermaid (serviço público de renderização)
-        api_url = f"https://mermaid.ink/img/{mermaid_encoded}"
+        # Criar arquivo .mmd temporário com codificação UTF-8
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False, dir=temp_dir, encoding='utf-8', newline='') as tmp_mmd:
+            tmp_mmd.write(mermaid_code)
+            mmd_file = tmp_mmd.name
         
-        print(f"[LOG] Renderizando Mermaid via API: {api_url[:80]}...")
-        
-        # Fazer requisição para a API
-        response = requests.get(api_url, timeout=30)
-        
-        if response.status_code == 200:
-            # Salvar a imagem
-            os.makedirs(temp_dir, exist_ok=True)
-            with open(output_path, 'wb') as f:
-                f.write(response.content)
-            print(f"[LOG] Imagem Mermaid gerada: {output_path}")
-            return output_path
-        else:
-            print(f"[AVISO] Falha ao renderizar Mermaid: status {response.status_code}")
-            return None
+        try:
+            # Executar o mmdc para gerar a imagem PNG
+            # Parâmetros comuns: -i input -o output -t (tema) -b (background) -w (largura) etc.
+            cmd_name = 'mmdc.cmd' if os.name == 'nt' else 'mmdc'
+            cmd = [
+                cmd_name,
+                '-i', mmd_file,
+                '-o', output_path,
+                '-t', 'default',      # tema (neutral, dark, forest, base, etc.)
+                '-b', 'transparent',  # fundo transparente (opcional)
+                '-w', '800'           # largura em pixels (ajuste conforme necessário)
+            ]
             
+            print(f"[LOG] Renderizando Mermaid localmente: {' '.join(cmd)}")
+            
+            # Executar o comando e aguardar
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', timeout=60)
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                print(f"[LOG] Imagem Mermaid gerada com sucesso: {output_path}")
+                return output_path
+            else:
+                print(f"[AVISO] Falha ao renderizar Mermaid via mmdc. Código: {result.returncode}")
+                if result.stderr:
+                    print(f"[ERRO] stderr: {result.stderr}")
+                return None
+                
+        finally:
+            # Limpar arquivo .mmd temporário
+            if os.path.exists(mmd_file):
+                os.unlink(mmd_file)
+                
     except Exception as e:
         print(f"[AVISO] Erro ao renderizar Mermaid: {str(e)}")
         return None
 
 def add_comentario_with_images(document, comentario_md, codigo_questao, imagens_dir, usar_src_absoluto=False):
+    if not comentario_md:
+        return
+        
     # Reduz múltiplas linhas em branco para apenas uma (\n\n), mantendo parágrafos separados
     comentario_md = re.sub(r'\n{3,}', '\n\n', comentario_md)
     
@@ -3951,6 +3942,116 @@ def gerar_banco_por_edital(conn, caminho_edital, nome_concurso, N, ano_minimo=20
     
     return output_filename
 
+def exportar_questoes_para_quiz_maker(conn, last_question_id, last_answer_id, first_question_id, quantity):
+    print(f"[LOG] Exportando questões para Quiz Maker...")
+    topicos_dict, topicos_raiz = carregar_hierarquia_topicos(conn)
+    cursor = conn.cursor(dictionary=True)
+    
+    query = """
+        SELECT questao_id, enunciado, alternativaA, alternativaB, alternativaC, alternativaD, alternativaE, gabarito, comentario, comentarioIA
+        FROM questaoresidencia
+        WHERE questao_id >= %s
+        ORDER BY questao_id
+        LIMIT %s
+    """
+    cursor.execute(query, (first_question_id, quantity))
+    questoes = cursor.fetchall()
+    
+    if not questoes:
+        print("[AVISO] Nenhuma questão encontrada com os parâmetros informados.")
+        return
+        
+    export_data = []
+    
+    current_q_id = last_question_id + 1
+    current_a_id = last_answer_id + 1
+    
+    create_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for q in questoes:
+        comentario_html = ""
+        comentario_raw = q['comentario'] if q['comentario'] else q['comentarioIA']
+        if comentario_raw:
+            try:
+                comentario_html = markdown(comentario_raw)
+            except Exception as e:
+                print(f"[AVISO] Erro ao converter markdown para HTML na questão {q['questao_id']}: {e}")
+                comentario_html = str(comentario_raw)
+                
+        classificacao_str = obter_classificacao_questao(conn, q['questao_id'], topicos_dict)
+        category = ""
+        if classificacao_str:
+            category = classificacao_str.split(" > ")[0]
+            
+        gabarito = (q['gabarito'] or "").strip().upper()
+        
+        answers = []
+        opcoes = [
+            ('A', q['alternativaA']),
+            ('B', q['alternativaB']),
+            ('C', q['alternativaC']),
+            ('D', q['alternativaD']),
+            ('E', q['alternativaE'])
+        ]
+        
+        ordering = 1
+        for letra, texto_alt in opcoes:
+            if texto_alt:
+                is_correct = "1" if gabarito == letra else "0"
+                answers.append({
+                    "id": str(current_a_id),
+                    "question_id": str(current_q_id),
+                    "answer": str(texto_alt),
+                    "image": "",
+                    "correct": is_correct,
+                    "ordering": str(ordering),
+                    "weight": "0",
+                    "placeholder": "",
+                    "keyword": letra,
+                    "slug": "",
+                    "options": "[]"
+                })
+                current_a_id += 1
+                ordering += 1
+                
+        options_str = '{"bg_image":"","use_html":"off","enable_question_text_max_length":"off","question_text_max_length":"","question_limit_text_type":"characters","question_enable_text_message":"off","enable_question_number_max_length":"off","question_number_max_length":"","quiz_hide_question_text":"off","enable_max_selection_number":"off","max_selection_number":"","quiz_question_note_message":"","enable_case_sensitive_text":"off","enable_min_selection_number":"off","min_selection_number":"","enable_question_number_min_length":"off","question_number_min_length":"","enable_question_number_error_message":"off","question_number_error_message":"","quiz_enable_question_stripslashes":"off","quiz_disable_answer_stripslashes":"off","answer_slug_max_id":1,"answer_incorrect_matches":[],"enable_question_upload_types":"off","question_upload_types":[],"question_upload_file_max_size":"1"}'
+
+        q_dict = {
+            "id": str(current_q_id),
+            "author_id": "1",
+            "question": q['enunciado'].replace('\\r\\n', ' ').replace('\\n', ' ') if q['enunciado'] else "",
+            "question_title": "",
+            "question_image": None,
+            "wrong_answer_text": comentario_html if current_q_id<10 else "",
+            "right_answer_text": "",
+            "question_hint": "",
+            "explanation": "",
+            "type": "radio",
+            "published": "1",
+            "create_date": create_date,
+            "not_influence_to_score": "off",
+            "weight": "1",
+            "options": options_str,
+            "tag_id": "",
+            "user_explanation": "off",
+            "answers_weight": "0",
+            "tag_title": "",
+            "category": category,
+            "answers": answers
+        }
+        
+        export_data.append(q_dict)
+        current_q_id += 1
+        
+    filename = f"quiz_maker_export_{create_date.replace(':', '').replace('-', '').replace(' ', '_')}.json"
+    filepath = os.path.join(os.path.dirname(__file__), filename)
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+        print(f"[LOG] Exportadas {len(export_data)} questões para {filename}")
+    except Exception as e:
+        print(f"[ERRO] Erro ao salvar arquivo JSON: {e}")
+
 if __name__ == "__main__":
     print("=== GERADOR DE BANCO DE QUESTÕES MÉDICAS ===")
     print()
@@ -3962,20 +4063,21 @@ if __name__ == "__main__":
     print("5 - Responder questões usando a IA (DeepSeek)")
     print("6 - Classificar questões sem tópico (DeepSeek AI)")
     print("7 - Banco a partir de Edital (Lista de Assuntos via DeepSeek)")
+    print("8 - Exportar questões para Quiz Maker")
     print()
     
     # Escolher modo de operação
     try:
-        modo = int(input("Digite sua opção (1 a 7): "))
-        if modo not in [1, 2, 3, 4, 5, 6, 7]:
-            print("Erro: Opção inválida! Digite de 1 a 7.")
+        modo = int(input("Digite sua opção (1 a 8): "))
+        if modo not in [1, 2, 3, 4, 5, 6, 7, 8]:
+            print("Erro: Opção inválida! Digite de 1 a 8.")
             exit(1)
     except ValueError:
         print("Erro: Digite um número válido!")
         exit(1)
     
     # Solicitar número total de questões
-    if modo not in [3, 4, 5, 6]:
+    if modo not in [3, 4, 5, 6, 8]:
         try:
             N = int(input("Número total de questões do banco (ex: 1000, 2000, 3000): "))
             if N <= 0:
@@ -3985,9 +4087,9 @@ if __name__ == "__main__":
             print("Erro: N deve ser um número inteiro!")
             exit(1)
     
-    # Solicitar ano mínimo para modos 1, 2, 3 e 7
+    # Solicitar ano mínimo para modos 1, 2, 3, 5, 6 e 7
     ano_minimo = None
-    if modo in [1, 2, 3, 7]:
+    if modo in [1, 2, 3, 5, 6, 7]:
         try:
             ano_minimo = int(input("Ano mínimo para filtrar as questões (ex: 2016, 2018, 2020): "))
             if ano_minimo < 1900 or ano_minimo > 2100:
@@ -4214,285 +4316,90 @@ if __name__ == "__main__":
         # MODO 5: Processar questões específicas por ID e/ou filtros
         print(f"\n[LOG] MODO 5: Responder questões usando a IA (DeepSeek)")
         print(f"[LOG] Usando API DeepSeek para análise e justificativa")
-        print()
         
-        # Solicitar IDs das questões (opcional)
-        questao_ids = None
-        ids_input = input("Informe um ou mais IDs de questões (separados por vírgula, ou Enter para não filtrar por ID): ").strip()
-        if ids_input:
-            try:
-                ids_str = [id_str.strip() for id_str in ids_input.split(',')]
-                questao_ids = []
-                
-                for id_str in ids_str:
-                    try:
-                        questao_id = int(id_str)
-                        if questao_id <= 0:
-                            print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser positivo)")
-                            continue
-                        questao_ids.append(questao_id)
-                    except ValueError:
-                        print(f"[AVISO] ID inválido ignorado: {id_str} (deve ser um número)")
-                
-                if questao_ids:
-                    print(f"[LOG] IDs de questões a processar: {questao_ids}")
-                else:
-                    questao_ids = None
-                    print("[AVISO] Nenhum ID válido fornecido, continuando apenas com filtros")
-            except Exception as e:
-                print(f"[AVISO] Erro ao processar IDs: {str(e)}, continuando apenas com filtros")
-                questao_ids = None
-        
-        # Solicitar limite (opcional)
-        limite = None
-        limite_input = input("Informe o número máximo de questões a processar (padrão todas, digite 0 para todas): ").strip()
-        if limite_input:
-            try:
-                limite_val = int(limite_input)
-                if limite_val < 0:
-                    print("Erro: o número deve ser maior ou igual a zero!")
-                    conn.close()
-                    exit(1)
-                limite = None if limite_val == 0 else limite_val
-            except ValueError:
-                print("Erro: informe um número inteiro válido!")
-                conn.close()
-                exit(1)
-        
-        # Solicitar filtro de instituição (opcional)
-        filtro_instituicao = None
-        instituicao_input = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
-        if instituicao_input:
-            filtro_instituicao = instituicao_input
-            
-        # Solicitar filtro de prova (opcional)
-        filtro_prova = None
-        prova_input = input("Deseja filtrar por prova? (Ex: ENAMED, pressione Enter para não filtrar): ").strip()
-        if prova_input:
-            filtro_prova = prova_input
-        
-        # Solicitar resto módulo 5 (opcional)
-        resto_mod5 = None
-        resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
+        resto_id_mod3 = None
+        codigo_minimo_input = int(input("Valor do código mínimo das questões"))
+        resto_input = input("Aplicar filtro questao_id % 3 = RESTO? (0 a 2) (Enter para não filtrar): ").strip()
         if resto_input:
             try:
                 resto_val = int(resto_input)
-                if resto_val not in [0, 1, 2, 3, 4]:
-                    print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
+                if resto_val not in list(range(3)):
+                    print("Erro: RESTO deve ser de 0 a 2!")
                     conn.close()
                     exit(1)
-                resto_mod5 = resto_val
+                resto_id_mod3 = resto_val
             except ValueError:
-                print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
+                print("Erro: RESTO deve ser um número inteiro entre 0 e 2!")
                 conn.close()
                 exit(1)
-        
-        # Solicitar filtro de ano específico (opcional)
-        filtro_ano = None
-        ano_input = input("Deseja filtrar pelo ano específico da prova? (Ex: 2025, Enter para todos): ").strip()
-        if ano_input:
-            try:
-                ano_val = int(ano_input)
-                filtro_ano = ano_val
-            except ValueError:
-                print("Erro: ano deve ser um número inteiro válido!")
-                conn.close()
-                exit(1)
-        
-        # Solicitar filtro de tópico (opcional)
-        filtro_topico = None
-        print()
-        print("Códigos dos tópicos raiz das principais áreas:")
-        print("  33  - Cirurgia")
-        print("  100 - Clínica Médica")
-        print("  48  - Pediatria")
-        print("  183 - Ginecologia")
-        print("  218 - Obstetrícia")
-        print("  29  - Medicina Preventiva")
-        print()
-        print("Ou informe o código de qualquer tópico (raiz ou sub-tópico) desejado.")
-        print("O sistema irá buscar questões sem comentários associadas ao tópico e todos os seus descendentes.")
-        print()
-        topico_input = input("Deseja filtrar por tópico? (digite o código do tópico ou Enter para não filtrar): ").strip()
-        if topico_input:
-            try:
-                topico_val = int(topico_input)
-                if topico_val <= 0:
-                    print("Erro: o código do tópico deve ser um número positivo!")
-                    conn.close()
-                    exit(1)
-                filtro_topico = topico_val
-            except ValueError:
-                print("Erro: o código do tópico deve ser um número inteiro válido!")
-                conn.close()
-                exit(1)
-        
-        # Validar se pelo menos um critério foi fornecido
-        if not questao_ids and limite is None and filtro_instituicao is None and resto_mod5 is None and filtro_ano is None and filtro_topico is None and filtro_prova is None:
-            print("[ERRO] Nenhum critério de busca fornecido! Forneça IDs ou pelo menos um filtro.")
-            conn.close()
-            exit(1)
-        
-        # Exibir resumo dos filtros
-        if questao_ids:
-            print(f"[LOG] IDs de questões: {questao_ids}")
-        if limite is not None:
-            print(f"[LOG] Limite: {limite}")
-        if filtro_instituicao:
-            print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
-        if filtro_prova:
-            print(f"[LOG] Filtro de prova: {filtro_prova}")
-        if resto_mod5 is not None:
-            print(f"[LOG] Filtro questao_id % 5 = {resto_mod5}")
-        if filtro_ano is not None:
-            print(f"[LOG] Filtro ano: {filtro_ano}")
-        if filtro_topico is not None:
-            print(f"[LOG] Filtro tópico: {filtro_topico} (incluindo descendentes)")
-            print(f"[LOG] Buscando apenas questões sem comentários (comentario IS NULL AND comentarioIA IS NULL)")
-        
+
+        print(f"[LOG] Filtro aplicado: ano >= {ano_minimo}")
+        if resto_id_mod3 is not None:
+            print(f"[LOG] Filtro aplicado: questao_id % 3 = {resto_id_mod3}")
+            
         try:
-            processar_questoes_por_id(conn, questao_ids=questao_ids, limite=limite, 
-                                     filtro_instituicao=filtro_instituicao, 
-                                     resto_mod5=resto_mod5, filtro_ano=filtro_ano, filtro_topico=filtro_topico, filtro_prova=filtro_prova)
+            processar_questoes_por_id(conn, resto_id_mod3=resto_id_mod3, filtro_ano_maior_igual=ano_minimo, codigo_minimo=codigo_minimo_input)
         except Exception as e:
             print(f"[ERRO] Erro ao processar questões: {str(e)}")
             conn.close()
             exit(1)
     
     elif modo == 6:
-        # MODO 6: Classificar questões sem tópico ou reclassificar questões específicas
+        # MODO 6: Classificar questões sem tópico
         print(f"\n[LOG] MODO 6: Classificação de questões")
         print(f"[LOG] Usando API DeepSeek para navegação hierárquica de tópicos")
-        print()
         
-        # Perguntar se o usuário quer classificar questões específicas por lista de IDs
-        opcao = input("Deseja classificar questões específicas por lista de IDs? (s/n, padrão n): ").strip().lower()
-        
-        if opcao in ['s', 'sim', 'y', 'yes']:
-            # Modo: Reclassificar questões específicas por lista de IDs
-            print("\n[LOG] Modo: Reclassificar questões específicas por lista de IDs ou arquivo")
-            ids_input = input("Informe a lista de questao_id separados por vírgula (ex: 123,456,789) ou o caminho para um arquivo .txt: ").strip()
-            
-            if not ids_input:
-                print("[ERRO] Nenhum ID ou arquivo foi informado!")
-                conn.close()
-                exit(1)
-            
-            # Verificar se a entrada é um arquivo existente
-            if os.path.isfile(ids_input):
-                print(f"[LOG] Lendo IDs do arquivo: {ids_input}")
-                try:
-                    with open(ids_input, 'r', encoding='utf-8') as f:
-                        conteudo = f.read()
-                        # Substituir quebras de linha, espaços e outros separadores por vírgula para processamento unificado
-                        conteudo = conteudo.replace('\n', ',').replace('\r', ',').replace(';', ',').replace(' ', ',')
-                        ids_input = conteudo
-                except Exception as e:
-                    print(f"[ERRO] Falha ao ler o arquivo: {str(e)}")
-                    conn.close()
-                    exit(1)
-            
-            # Processar lista de IDs
+        questao_ids = None
+        ids_input = input("Informe um ou mais IDs de questões (separados por vírgula, ou Enter para não filtrar por ID): ").strip()
+        if ids_input:
             try:
+                ids_str = [id_str.strip() for id_str in ids_input.split(',')]
                 questao_ids = []
-                ids_list = [id_str.strip() for id_str in ids_input.split(',')]
-                for id_str in ids_list:
-                    if id_str:
-                        questao_id = int(id_str)
-                        if questao_id <= 0:
-                            print(f"[ERRO] ID inválido: {id_str}. IDs devem ser números positivos!")
-                            conn.close()
-                            exit(1)
-                        questao_ids.append(questao_id)
-                
-                if not questao_ids:
-                    print("[ERRO] Nenhum ID válido foi informado!")
-                    conn.close()
-                    exit(1)
-                
-                print(f"[LOG] Processando {len(questao_ids)} questões específicas")
-                processar_classificacao_questoes_por_ids(conn, questao_ids)
-                
-            except ValueError as e:
-                print(f"[ERRO] Erro ao processar lista de IDs: {str(e)}")
-                print("[ERRO] Certifique-se de informar apenas números inteiros separados por vírgula!")
-                conn.close()
-                exit(1)
+                for id_str in ids_str:
+                    try:
+                        q_id = int(id_str)
+                        if q_id > 0:
+                            questao_ids.append(q_id)
+                    except ValueError:
+                        print(f"[AVISO] ID inválido ignorado: {id_str}")
+                if questao_ids:
+                    print(f"[LOG] Filtro aplicado: IDs de questões a processar: {questao_ids}")
+                else:
+                    questao_ids = None
             except Exception as e:
-                print(f"[ERRO] Erro inesperado: {str(e)}")
+                print(f"[AVISO] Erro ao processar IDs: {str(e)}")
+                questao_ids = None
+                
+        resto_id_mod5 = None
+        resto_input = input("Aplicar filtro questao_id % 10 = RESTO? (0 a 9) (Enter para não filtrar): ").strip()
+        if resto_input:
+            try:
+                resto_val = int(resto_input)
+                if resto_val not in list(range(10)):
+                    print("Erro: RESTO deve ser de 0 a 9!")
+                    conn.close()
+                    exit(1)
+                resto_id_mod5 = resto_val
+            except ValueError:
+                print("Erro: RESTO deve ser um número inteiro entre 0 e 9!")
                 conn.close()
                 exit(1)
-        else:
-            # Modo original: Classificar questões sem tópico
-            print("\n[LOG] Modo: Classificar questões sem tópico")
-            
-            limite = 20
-            limite_input = input("Informe o número máximo de questões a classificar (padrão 20, digite 0 para todas): ").strip()
-            if limite_input:
-                try:
-                    limite_val = int(limite_input)
-                    if limite_val < 0:
-                        print("Erro: o número deve ser maior ou igual a zero!")
-                        conn.close()
-                        exit(1)
-                    limite = None if limite_val == 0 else limite_val
-                except ValueError:
-                    print("Erro: informe um número inteiro válido!")
-                    conn.close()
-                    exit(1)
-            else:
-                limite = 20
 
-            filtro_instituicao = input("Deseja filtrar por instituição? (pressione Enter para todas): ").strip()
-            if not filtro_instituicao:
-                filtro_instituicao = None
-
-            filtro_prova = input("Deseja filtrar por prova? (Ex: ENAMED, pressione Enter para não filtrar): ").strip()
-            if not filtro_prova:
-                filtro_prova = None
-
-            resto_mod5 = None
-            resto_input = input("Aplicar filtro questao_id % 5 = RESTO? (Enter para não filtrar): ").strip()
-            if resto_input:
-                try:
-                    resto_val = int(resto_input)
-                    if resto_val not in [0, 1, 2, 3, 4]:
-                        print("Erro: RESTO deve ser 0, 1, 2, 3 ou 4!")
-                        conn.close()
-                        exit(1)
-                    resto_mod5 = resto_val
-                except ValueError:
-                    print("Erro: RESTO deve ser um número inteiro entre 0 e 4!")
-                    conn.close()
-                    exit(1)
-
-            print(f"[LOG] Limite: {'todas' if limite is None else limite}")
-            if filtro_instituicao:
-                print(f"[LOG] Filtro de instituição: {filtro_instituicao}")
-            if filtro_prova:
-                print(f"[LOG] Filtro de prova: {filtro_prova}")
-            if resto_mod5 is not None:
-                print(f"[LOG] Filtro questao_id %% 5 = {resto_mod5}")
-            filtro_ano = None
-            ano_input = input("Deseja filtrar pelo ano específico da prova? (Ex: 2025, Enter para todos): ").strip()
-            if ano_input:
-                try:
-                    ano_val = int(ano_input)
-                    filtro_ano = ano_val
-                    print(f"[LOG] Filtro ano: {filtro_ano}")
-                except ValueError:
-                    print("Erro: ano deve ser um número inteiro válido!")
-                    conn.close()
-                    exit(1)
-
-            processar_classificacao_questoes_sem_topico(
-                conn,
-                limite=limite,
-                filtro_instituicao=filtro_instituicao,
-                resto_mod5=resto_mod5,
-                filtro_ano=filtro_ano,
-                filtro_prova=filtro_prova
-            )
+        print(f"[LOG] Filtro aplicado: ano >= {ano_minimo}")
+        if resto_id_mod5 is not None:
+            print(f"[LOG] Filtro aplicado: questao_id % 10 = {resto_id_mod5}")
+        
+        processar_classificacao_questoes_sem_topico(
+            conn,
+            limite=None,
+            filtro_instituicao=None,
+            resto_id_mod5=resto_id_mod5,
+            filtro_ano=None,
+            filtro_prova=None,
+            filtro_ano_maior_igual=ano_minimo,
+            filtro_codigo_menor=None,
+            questao_ids=questao_ids
+        )
             
     elif modo == 7:
         # MODO 7: Banco baseado na lista do edital
@@ -4521,6 +4428,21 @@ if __name__ == "__main__":
             print("\n[ERRO] Falha na geração do banco de questões por edital!")
             conn.close()
             exit(1)
+            
+    elif modo == 8:
+        # MODO 8: Exportar questões para Quiz Maker
+        print(f"\n[LOG] MODO 8: Exportar questões para Quiz Maker")
+        try:
+            last_question_id = int(input("Valor do ID da última questão armazenada no plugin: "))
+            last_answer_id = int(input("Valor do ID da última alternativa armazenada no plugin: "))
+            first_question_id = int(input("ID 'questao_id' da primeira questão a ser recuperada: "))
+            quantity = int(input("Quantidade de questões subsequentes: "))
+        except ValueError:
+            print("Erro: Todos os valores devem ser números inteiros!")
+            conn.close()
+            exit(1)
+            
+        exportar_questoes_para_quiz_maker(conn, last_question_id, last_answer_id, first_question_id, quantity)
     
     conn.close()
     print("\n[LOG] Processo concluído!")

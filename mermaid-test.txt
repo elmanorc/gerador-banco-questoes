@@ -1,0 +1,1 @@
+graph TD\n    A[Isquemia Arterial Aguda] --> B{Avaliação Grau};\n    B --> C[Grau I/IIA];\n    B --> D[Grau IIB - Este Caso];\n    B --> E[Grau III];\n    \n    C --> F[Trombólise/Angioplastia];\n    D --> G[🚨 TROMBECTOMIA CIRÚRGICA];\n    E --> H[Amputação];\n    \n    G --> I[Salvamento do Membro];\n    G --> J[Restauração Fluxo Imediato];
