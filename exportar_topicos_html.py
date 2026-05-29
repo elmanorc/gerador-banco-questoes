@@ -174,8 +174,10 @@ def main():
             )
             html_tree_parts.append(f'  <summary class="topic-summary">')
             html_tree_parts.append(f'    <span class="caret-icon">▸</span>')
-            html_tree_parts.append(f'    <span class="topic-title">{nome_escaped}</span>')
-            html_tree_parts.append(f'    <span class="topic-id" style="color: var(--text-muted); font-size: 11px; margin-left: 4px; font-weight: normal; font-family: monospace;">({node_id})</span>')
+            html_tree_parts.append(f'    <div class="topic-text-wrapper" style="flex: 1; display: flex; align-items: center; gap: 6px; overflow: hidden; min-width: 0;">')
+            html_tree_parts.append(f'      <span class="topic-title">{nome_escaped}</span>')
+            html_tree_parts.append(f'      <span class="topic-id" style="color: var(--text-muted); font-size: 11px; font-weight: normal; font-family: monospace; flex-shrink: 0;">({node_id})</span>')
+            html_tree_parts.append(f'    </div>')
             html_tree_parts.append(f'    <span class="badges-wrapper">{direct_badge}{total_badge}</span>')
             html_tree_parts.append(f'  </summary>')
             html_tree_parts.append(f'  <div class="topic-content">')
@@ -191,8 +193,10 @@ def main():
             )
             html_tree_parts.append(f'  <div class="topic-summary leaf-summary">')
             html_tree_parts.append(f'    <span class="bullet-icon">•</span>')
-            html_tree_parts.append(f'    <span class="topic-title">{nome_escaped}</span>')
-            html_tree_parts.append(f'    <span class="topic-id" style="color: var(--text-muted); font-size: 11px; margin-left: 4px; font-weight: normal; font-family: monospace;">({node_id})</span>')
+            html_tree_parts.append(f'    <div class="topic-text-wrapper" style="flex: 1; display: flex; align-items: center; gap: 6px; overflow: hidden; min-width: 0;">')
+            html_tree_parts.append(f'      <span class="topic-title">{nome_escaped}</span>')
+            html_tree_parts.append(f'      <span class="topic-id" style="color: var(--text-muted); font-size: 11px; font-weight: normal; font-family: monospace; flex-shrink: 0;">({node_id})</span>')
+            html_tree_parts.append(f'    </div>')
             html_tree_parts.append(f'    <span class="badges-wrapper">{direct_badge}{total_badge}</span>')
             html_tree_parts.append(f'  </div>')
             html_tree_parts.append(f'</div>')
@@ -686,7 +690,6 @@ def main():
         }}
 
         .topic-title {{
-            flex: 1;
             word-break: break-word;
         }}
 

@@ -11,7 +11,8 @@
 banco_questoes_*.docx
 
 # API Key do DeepSeek e do Gemini (não versionar)
-api_key.txt
+api_key_deepseek.txt
+api_key_chatgpt.txt
 api_key_gemini.txt
 
 # Imagens Mermaid temporárias (não versionar)

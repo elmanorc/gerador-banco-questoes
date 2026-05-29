@@ -34,7 +34,7 @@ def load_db_password():
         sys.exit(1)
 
 def load_api_key():
-    api_key_path = os.path.join(os.path.dirname(__file__), 'api_key.txt')
+    api_key_path = os.path.join(os.path.dirname(__file__), 'api_key_deepseek.txt')
     try:
         with open(api_key_path, 'r', encoding='utf-8') as f:
             api_key = f.read().strip()
@@ -151,71 +151,7 @@ def buscar_topico_por_nome_ou_id(cur, termo):
     cur.execute("SELECT id, nome, id_pai FROM topico WHERE nome LIKE %s LIMIT 30", (f"%{termo}%",))
     return cur.fetchall()
 
-def main():
-    safe_print("=========================================================")
-    safe_print("=== GERADOR E SUGERIDOR DE SUBTOPICOS VIA DEEPSEEK ===")
-    safe_print("=========================================================")
-
-    # Conectar ao banco
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cur = conn.cursor(dictionary=True)
-        safe_print("[LOG] Conexao com banco de dados estabelecida. [OK]")
-    except Exception as e:
-        safe_print(f"[ERRO] Falha ao conectar ao banco de dados: {e}")
-        sys.exit(1)
-
-    # 1. Selecionar o tópico pai
-    topico_selecionado = None
-    while not topico_selecionado:
-        termo = input("\nDigite o ID ou parte do NOME do topico pai (ex: Neuropediatria ou 2354): ").strip()
-        if not termo:
-            continue
-        
-        resultados = buscar_topico_por_nome_ou_id(cur, termo)
-        if not resultados:
-            safe_print(f"[AVISO] Nenhum topico encontrado para '{termo}'. Tente novamente.")
-            continue
-        
-        if len(resultados) == 1:
-            topico_selecionado = resultados[0]
-        else:
-            safe_print(f"\nForam encontrados {len(resultados)} topicos. Escolha o ID correto:")
-            for idx, r in enumerate(resultados, 1):
-                # Pegar caminho do pai
-                caminho = get_caminho_ancestrais(cur, r['id'])
-                safe_print(f"  [{idx}] ID: {r['id']} | Hierarquia: {caminho}")
-            
-            escolha = input("\nSelecione o numero da opcao correta (ou pressione Enter para pesquisar de novo): ").strip()
-            if escolha.isdigit() and 1 <= int(escolha) <= len(resultados):
-                topico_selecionado = resultados[int(escolha) - 1]
-            else:
-                continue
-
-    parent_id = topico_selecionado['id']
-    parent_nome = topico_selecionado['nome']
-    hierarquia_pai = get_caminho_ancestrais(cur, parent_id)
-    
-    safe_print(f"\n[LOG] Topico Pai Selecionado: {parent_nome} (ID: {parent_id})")
-    safe_print(f"[LOG] Hierarquia Completa: {hierarquia_pai}")
-
-    # Verificar se já possui filhos
-    cur.execute("SELECT id, nome FROM topico WHERE id_pai = %s", (parent_id,))
-    filhos_existentes = cur.fetchall()
-    if filhos_existentes:
-        safe_print(f"\n[AVISO] Este topico ja possui {len(filhos_existentes)} subtopicos filhos cadastrados:")
-        for f in filhos_existentes[:10]:
-            safe_print(f"  - [{f['id']}] {f['nome']}")
-        if len(filhos_existentes) > 10:
-            safe_print(f"  ... e mais {len(filhos_existentes) - 10} filhos.")
-        
-        continuar = input("\nDeseja mesmo assim adicionar novos subtopicos? (s/n, padrao: s): ").strip().lower()
-        if continuar == 'n':
-            cur.close()
-            conn.close()
-            safe_print("Operacao cancelada pelo usuario.")
-            sys.exit(0)
-
+def sugerir_e_criar_subtopicos(cur, conn, parent_id, parent_nome, hierarquia_pai):
     # 2. Coletar contexto de questões sob este tópico
     safe_print("\n[LOG] Buscando questoes classificadas neste topico para contexto da IA...")
     cur.execute("""
@@ -256,7 +192,7 @@ Abaixo estão alguns exemplos de enunciados de questões reais classificadas sob
 
 {prompt_custom_instruction}
 
-Com base nisso, sugira entre 5 e 10 subtópicos específicos, clinicamente corretos, mutuamente exclusivos e abrangentes para dividir este assunto.
+Com base nisso, sugira entre 2 e 10 subtópicos específicos, clinicamente corretos, mutuamente exclusivos e abrangentes para dividir este assunto.
 Evite tópicos excessivamente longos ou genéricos (como "Outros", "Introdução", "Geral", "Miscelânea").
 
 Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descricao" (sem tags markdown de texto extras, fora do bloco de código):
@@ -355,6 +291,7 @@ Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descri
         
         conn.commit()
         safe_print("[LOG] Gravacao dos subtopicos concluida e commitada no banco de dados. [OK]")
+        return novos_topicos_ids
     except Exception as e:
         conn.rollback()
         safe_print(f"[ERRO] Falha ao inserir subtopicos no banco de dados: {e}")
@@ -362,7 +299,99 @@ Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descri
         conn.close()
         sys.exit(1)
 
-    # 6. Reclassificação Automática de Questões Existentes (Bônus)
+def main():
+    safe_print("=========================================================")
+    safe_print("=== GERADOR E SUGERIDOR DE SUBTOPICOS VIA DEEPSEEK ===")
+    safe_print("=========================================================")
+
+    # Conectar ao banco
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor(dictionary=True)
+        safe_print("[LOG] Conexao com banco de dados estabelecida. [OK]")
+    except Exception as e:
+        safe_print(f"[ERRO] Falha ao conectar ao banco de dados: {e}")
+        sys.exit(1)
+
+    # 1. Selecionar o tópico pai
+    topico_selecionado = None
+    while not topico_selecionado:
+        termo = input("\nDigite o ID ou parte do NOME do topico pai (ex: Neuropediatria ou 2354): ").strip()
+        if not termo:
+            continue
+        
+        resultados = buscar_topico_por_nome_ou_id(cur, termo)
+        if not resultados:
+            safe_print(f"[AVISO] Nenhum topico encontrado para '{termo}'. Tente novamente.")
+            continue
+        
+        if len(resultados) == 1:
+            topico_selecionado = resultados[0]
+        else:
+            safe_print(f"\nForam encontrados {len(resultados)} topicos. Escolha o ID correto:")
+            for idx, r in enumerate(resultados, 1):
+                # Pegar caminho do pai
+                caminho = get_caminho_ancestrais(cur, r['id'])
+                safe_print(f"  [{idx}] ID: {r['id']} | Hierarquia: {caminho}")
+            
+            escolha = input("\nSelecione o numero da opcao correta (ou pressione Enter para pesquisar de novo): ").strip()
+            if escolha.isdigit() and 1 <= int(escolha) <= len(resultados):
+                topico_selecionado = resultados[int(escolha) - 1]
+            else:
+                continue
+
+    parent_id = topico_selecionado['id']
+    parent_nome = topico_selecionado['nome']
+    hierarquia_pai = get_caminho_ancestrais(cur, parent_id)
+    
+    safe_print(f"\n[LOG] Topico Pai Selecionado: {parent_nome} (ID: {parent_id})")
+    safe_print(f"[LOG] Hierarquia Completa: {hierarquia_pai}")
+
+    # Verificar se já possui filhos
+    cur.execute("SELECT id, nome FROM topico WHERE id_pai = %s", (parent_id,))
+    filhos_existentes = cur.fetchall()
+    
+    modo = None
+    if filhos_existentes:
+        safe_print(f"\n[LOG] Este topico ja possui {len(filhos_existentes)} subtopicos filhos cadastrados:")
+        for idx, f in enumerate(filhos_existentes[:15], 1):
+            safe_print(f"  - [{f['id']}] {f['nome']}")
+        if len(filhos_existentes) > 15:
+            safe_print(f"  ... e mais {len(filhos_existentes) - 15} filhos.")
+            
+        safe_print("\nEscolha a acao desejada:")
+        safe_print("  [1] Pipeline Completo (Sugerir novos subtopicos com IA + Classificar questoes)")
+        safe_print("  [2] Apenas Classificacao (Classificar questoes nos subtopicos ja existentes)")
+        safe_print("  [3] Cancelar e sair")
+        
+        while True:
+            escolha_modo = input("\nEscolha uma opcao (1-3): ").strip()
+            if escolha_modo == '1':
+                modo = 'completo'
+                break
+            elif escolha_modo == '2':
+                modo = 'apenas_classificacao'
+                break
+            elif escolha_modo == '3':
+                cur.close()
+                conn.close()
+                safe_print("Operacao cancelada pelo usuario.")
+                sys.exit(0)
+            else:
+                safe_print("[AVISO] Opcao invalida.")
+    else:
+        safe_print("\n[LOG] Este topico nao possui subtopicos filhos cadastrados.")
+        safe_print("Iniciando o Pipeline Completo para sugerir novos subtopicos...")
+        modo = 'completo'
+
+    if modo == 'completo':
+        novos_topicos_ids = sugerir_e_criar_subtopicos(cur, conn, parent_id, parent_nome, hierarquia_pai)
+    else:
+        # Apenas classificação nos subtopicos já existentes
+        novos_topicos_ids = [(f['id'], f['nome']) for f in filhos_existentes]
+        safe_print(f"\n[LOG] Usando {len(novos_topicos_ids)} subtopicos ja existentes para a classificacao.")
+
+    # 6. Reclassificação Automática de Questões Existentes
     # Contar total de questões diretamente associadas ao pai
     cur.execute("""
         SELECT COUNT(DISTINCT cq.id_questao) as count
@@ -374,13 +403,19 @@ Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descri
     
     if total_questoes_pai > 0:
         safe_print(f"\n=========================================================")
-        safe_print(f"=== RECLASSIFICACAO DE QUESTOES ===")
+        safe_print(f"=== CLASSIFICACAO DE QUESTOES ===")
         safe_print(f"=========================================================")
         safe_print(f"Existem atualmente {total_questoes_pai} questoes associadas diretamente ao topico pai '{parent_nome}'.")
-        reclassificar = input("Deseja reclassificar essas questoes automaticamente nos novos subtopicos criados? (s/n, padrao: s): ").strip().lower()
+        
+        if modo == 'apenas_classificacao':
+            msg_pergunta = "Deseja classificar essas questoes nos subtopicos existentes? (s/n, padrao: s): "
+        else:
+            msg_pergunta = "Deseja reclassificar essas questoes automaticamente nos novos subtopicos criados? (s/n, padrao: s): "
+            
+        reclassificar = input(msg_pergunta).strip().lower()
         
         if reclassificar != 'n':
-            safe_print("\n[LOG] Buscando dados das questoes a reclassificar...")
+            safe_print("\n[LOG] Buscando dados das questoes a classificar...")
             cur.execute("""
                 SELECT q.questao_id, q.codigo, q.enunciado, q.alternativaA, q.alternativaB, q.alternativaC, q.alternativaD, q.alternativaE, q.gabarito
                 FROM classificacao_questao cq
@@ -393,7 +428,7 @@ Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descri
             subtopicos_opcoes = "\n".join([f"{idx}. {nome} (ID: {tid})" for idx, (tid, nome) in enumerate(novos_topicos_ids, 1)])
             num_opcoes = len(novos_topicos_ids)
             
-            safe_print(f"[LOG] Iniciando reclassificacao de {len(questoes_para_reclassificar)} questoes...")
+            safe_print(f"[LOG] Iniciando classificacao de {len(questoes_para_reclassificar)} questoes...")
             reclassificadas = 0
             
             for idx_q, q in enumerate(questoes_para_reclassificar, 1):
@@ -409,7 +444,7 @@ Responda APENAS com um array JSON de objetos contendo os campos "nome" e "descri
                 
                 prompt_reclass = f"""
 Você é um classificador estruturado de questões de medicina e residência médica.
-A questão abaixo pertencia ao tópico abrangente "{parent_nome}". Acabamos de subdividi-lo e criar os seguintes subtópicos específicos:
+A questão abaixo pertencia ao tópico abrangente "{parent_nome}". O tópico possui os seguintes subtópicos específicos:
 {subtopicos_opcoes}
 
 Analise a questão e determine a qual subtópico ela pertence mais especificamente.
@@ -451,14 +486,16 @@ Responda APENAS com o número correspondente ao subtópico na lista acima (1 a {
             
             # Salvar reclassificações
             conn.commit()
-            safe_print(f"\n[LOG] Reclassificacao concluida! {reclassificadas} de {len(questoes_para_reclassificar)} questoes foram reclassificadas com sucesso. [OK]")
+            safe_print(f"\n[LOG] Classificacao concluida! {reclassificadas} de {len(questoes_para_reclassificar)} questoes foram classificadas com sucesso. [OK]")
+    else:
+        safe_print(f"\n[LOG] Nenhuma questao diretamente associada ao topico pai '{parent_nome}' encontrada para classificar.")
     
     cur.close()
     conn.close()
     safe_print("\n=========================================================")
     safe_print("=== OPERACAO FINALIZADA COM SUCESSO! ===")
     safe_print("=========================================================")
-    safe_print("Todos os subtópicos foram criados e as questões organizadas!")
+    safe_print("Todos os subtópicos foram verificados e as questões organizadas!")
 
 if __name__ == "__main__":
     main()
